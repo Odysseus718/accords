@@ -327,10 +327,12 @@ function askText(title, value, { placeholder = '', ok = 'OK' } = {}) {
       done = true;
       const v = inp.value.trim();
       closeSheet();
-      resolve(v || null);
+      resolve(v);
     };
     $('#ask-ok').onclick = submit;
-    inp.onkeydown = (e) => e.key === 'Enter' && submit();
+    inp.onkeydown = (e) => {
+      if (e.key === 'Enter') submit();
+    };
   });
 }
 function confirmBox(title, text, okLabel = 'Supprimer', danger = true) {
@@ -1149,7 +1151,7 @@ const A = {
   new: async () => {
     const name = await askText('Nouvelle progression', '', { placeholder: 'Nom du morceau', ok: 'Créer' });
     if (name === null) return;
-    const p = newProg(name);
+    const p = newProg(name || 'Nouvelle progression');
     S.progs.push(p);
     touch(p);
     go('editor', p.id);
