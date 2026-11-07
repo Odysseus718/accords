@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Accords</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#121316">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Accords">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/app.css">
+<script>window.APP_VERSION = '20261107-95246c6';</script>
+</head>
+<body>
+<div id="app"></div>
+<div id="sheet-root"></div>
+<div id="toast" role="status"></div>
+<script type="module" src="js/app.js"></script>
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').then(function (reg) {
+    function waiting(w) { window.__swWaiting = w; window.dispatchEvent(new Event('app-update-ready')); }
+    if (reg.waiting && navigator.serviceWorker.controller) waiting(reg.waiting);
+    reg.addEventListener('updatefound', function () {
+      var w = reg.installing;
+      w.addEventListener('statechange', function () {
+        if (w.state === 'installed' && navigator.serviceWorker.controller) waiting(w);
+      });
+    });
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') reg.update().catch(function(){}); });
+  });
+  var reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', function () { if (!reloaded) { reloaded = true; location.reload(); } });
+}
+</script>
+</body>
+</html>

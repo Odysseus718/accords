@@ -1,0 +1,188 @@
+// Service worker : met toute l'app en cache pour un fonctionnement 100 % hors ligne.
+const VERSION = '20261107-95246c6';
+const CACHE = 'accords-' + VERSION;
+const ASSETS = [
+ "./",
+ "acoustic/A2.mp3",
+ "acoustic/A3.mp3",
+ "acoustic/A4.mp3",
+ "acoustic/A5.mp3",
+ "acoustic/C2.mp3",
+ "acoustic/C3.mp3",
+ "acoustic/C4.mp3",
+ "acoustic/C5.mp3",
+ "acoustic/Eb2.mp3",
+ "acoustic/Eb3.mp3",
+ "acoustic/Eb4.mp3",
+ "acoustic/Eb5.mp3",
+ "acoustic/Gb2.mp3",
+ "acoustic/Gb3.mp3",
+ "acoustic/Gb4.mp3",
+ "acoustic/Gb5.mp3",
+ "bass/A1.mp3",
+ "bass/A2.mp3",
+ "bass/C1.mp3",
+ "bass/C2.mp3",
+ "bass/C3.mp3",
+ "bass/Eb1.mp3",
+ "bass/Eb2.mp3",
+ "bass/Gb1.mp3",
+ "bass/Gb2.mp3",
+ "clean/A2.mp3",
+ "clean/A3.mp3",
+ "clean/A4.mp3",
+ "clean/A5.mp3",
+ "clean/C2.mp3",
+ "clean/C3.mp3",
+ "clean/C4.mp3",
+ "clean/C5.mp3",
+ "clean/Eb2.mp3",
+ "clean/Eb3.mp3",
+ "clean/Eb4.mp3",
+ "clean/Eb5.mp3",
+ "clean/Gb2.mp3",
+ "clean/Gb3.mp3",
+ "clean/Gb4.mp3",
+ "clean/Gb5.mp3",
+ "css/app.css",
+ "drive/A2.mp3",
+ "drive/A3.mp3",
+ "drive/A4.mp3",
+ "drive/A5.mp3",
+ "drive/C2.mp3",
+ "drive/C3.mp3",
+ "drive/C4.mp3",
+ "drive/C5.mp3",
+ "drive/Eb2.mp3",
+ "drive/Eb3.mp3",
+ "drive/Eb4.mp3",
+ "drive/Eb5.mp3",
+ "drive/Gb2.mp3",
+ "drive/Gb3.mp3",
+ "drive/Gb4.mp3",
+ "drive/Gb5.mp3",
+ "icons/apple-touch-icon.png",
+ "icons/icon-192.png",
+ "icons/icon-512.png",
+ "index.html",
+ "js/app.js",
+ "js/audio.js",
+ "js/diagram.js",
+ "js/guitar.js",
+ "js/store.js",
+ "js/theory.js",
+ "manifest.webmanifest",
+ "organ/A2.mp3",
+ "organ/A3.mp3",
+ "organ/A4.mp3",
+ "organ/A5.mp3",
+ "organ/C2.mp3",
+ "organ/C3.mp3",
+ "organ/C4.mp3",
+ "organ/C5.mp3",
+ "organ/Eb2.mp3",
+ "organ/Eb3.mp3",
+ "organ/Eb4.mp3",
+ "organ/Eb5.mp3",
+ "organ/Gb2.mp3",
+ "organ/Gb3.mp3",
+ "organ/Gb4.mp3",
+ "organ/Gb5.mp3",
+ "pad/A2.mp3",
+ "pad/A3.mp3",
+ "pad/A4.mp3",
+ "pad/A5.mp3",
+ "pad/C2.mp3",
+ "pad/C3.mp3",
+ "pad/C4.mp3",
+ "pad/C5.mp3",
+ "pad/Eb2.mp3",
+ "pad/Eb3.mp3",
+ "pad/Eb4.mp3",
+ "pad/Eb5.mp3",
+ "pad/Gb2.mp3",
+ "pad/Gb3.mp3",
+ "pad/Gb4.mp3",
+ "pad/Gb5.mp3",
+ "piano/A2.mp3",
+ "piano/A3.mp3",
+ "piano/A4.mp3",
+ "piano/A5.mp3",
+ "piano/C2.mp3",
+ "piano/C3.mp3",
+ "piano/C4.mp3",
+ "piano/C5.mp3",
+ "piano/Eb2.mp3",
+ "piano/Eb3.mp3",
+ "piano/Eb4.mp3",
+ "piano/Eb5.mp3",
+ "piano/Gb2.mp3",
+ "piano/Gb3.mp3",
+ "piano/Gb4.mp3",
+ "piano/Gb5.mp3",
+ "rhodes/A2.mp3",
+ "rhodes/A3.mp3",
+ "rhodes/A4.mp3",
+ "rhodes/A5.mp3",
+ "rhodes/C2.mp3",
+ "rhodes/C3.mp3",
+ "rhodes/C4.mp3",
+ "rhodes/C5.mp3",
+ "rhodes/Eb2.mp3",
+ "rhodes/Eb3.mp3",
+ "rhodes/Eb4.mp3",
+ "rhodes/Eb5.mp3",
+ "rhodes/Gb2.mp3",
+ "rhodes/Gb3.mp3",
+ "rhodes/Gb4.mp3",
+ "rhodes/Gb5.mp3",
+ "strings/A2.mp3",
+ "strings/A3.mp3",
+ "strings/A4.mp3",
+ "strings/A5.mp3",
+ "strings/C2.mp3",
+ "strings/C3.mp3",
+ "strings/C4.mp3",
+ "strings/C5.mp3",
+ "strings/Eb2.mp3",
+ "strings/Eb3.mp3",
+ "strings/Eb4.mp3",
+ "strings/Eb5.mp3",
+ "strings/Gb2.mp3",
+ "strings/Gb3.mp3",
+ "strings/Gb4.mp3",
+ "strings/Gb5.mp3"
+];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((a) => new Request(a, { cache: 'reload' })))));
+});
+self.addEventListener('activate', (e) => {
+  e.waitUntil(
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k.startsWith('accords-') && k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())
+  );
+});
+self.addEventListener('message', (e) => {
+  if (e.data === 'skipWaiting') self.skipWaiting();
+});
+self.addEventListener('fetch', (e) => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+  if (url.origin !== location.origin) return;
+  e.respondWith(
+    caches.open(CACHE).then(async (c) => {
+      const hit = await c.match(req, { ignoreSearch: true });
+      if (hit) return hit;
+      if (req.mode === 'navigate') {
+        const idx = await c.match('./index.html');
+        if (idx) return idx;
+      }
+      try {
+        return await fetch(req);
+      } catch (err) {
+        return new Response('Hors ligne', { status: 503 });
+      }
+    })
+  );
+});
