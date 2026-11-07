@@ -3,14 +3,10 @@ import { chosenVoicing, suggestCapo, voicingMidi, GUITAR_TUNINGS, BASS_TUNINGS }
 import { guitarDiagram, bassNeck } from './diagram.js';
 import { INSTRUMENTS, IMAP, Player, previewChord, unlock, loadSamples } from './audio.js';
 import { store, requestPersistence, isStandalone, makeExport, shareOrDownload, pickFile, parseImport } from './store.js';
+import { $, $$, esc, uid, clamp, ICON, toast, undoToast, openSheet, renderSheet, closeSheet, currentSheet, askText, confirmBox, pct, confClass } from './ui.js';
+import { importPage, importActions, resetImport } from './importer.js';
 
-// ---------------------------------------------------------------- utilitaires
-const $ = (s, r = document) => r.querySelector(s);
-const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-
+// ---------------------------------------------------------------- constantes
 const SIGS = [[2, 4], [3, 4], [4, 4], [5, 4], [6, 8], [7, 8], [9, 8], [12, 8]];
 const PATTERNS = [
   { id: 'hold', label: 'Tenu', hint: 'une attaque par accord' },
@@ -28,6 +24,12 @@ const WHITE = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
 const BLACK = { 1: ['C#', 'Db'], 3: ['D#', 'Eb'], 6: ['F#', 'Gb'], 8: ['G#', 'Ab'], 10: ['A#', 'Bb'] };
 const PC_NAME = (p, acc) => (BLACK[p] ? BLACK[p][acc === 'b' ? 1 : 0] : T.pcName(p));
 
+export const CONCERT_PRESETS = {
+  guitar: { label: 'Guitare', guitar: true, bass: false, next: true, nextGuitar: true, nextBass: false },
+  bass: { label: 'Basse', guitar: false, bass: true, next: true, nextGuitar: false, nextBass: true },
+  both: { label: 'Guitare + basse', guitar: true, bass: true, next: true, nextGuitar: true, nextBass: false },
+  names: { label: 'Noms seuls', guitar: false, bass: false, next: true, nextGuitar: false, nextBass: false },
+};
 const DEFAULT_SETTINGS = {
   notation: { editor: 'en', guitar: 'en', bass: 'fr' },
   guitarTuning: 'standard',
@@ -35,24 +37,28 @@ const DEFAULT_SETTINGS = {
   bassLabels: 'notes',
   lastBackup: 0,
   lastChange: 0,
+  concert: { preset: 'both', ...CONCERT_PRESETS.both, section: true, pulse: true, tempo: true, nextRootMark: true, shortNeck: false },
 };
 
-const S = {
+export const S = {
   settings: structuredClone(DEFAULT_SETTINGS),
   progs: [],
-  view: 'gallery',
+  tab: 'compo',
+  live: false,
   cur: null,
   sel: -1,
-  play: null, // dernier évènement de lecture
+  play: null,
   concertIdx: 0,
   persist: '',
   seq: null,
+  gfilter: 'mine',
+  gsearch: '',
 };
 
 const gTun = () => (GUITAR_TUNINGS[S.settings.guitarTuning] || GUITAR_TUNINGS.standard).midi;
 const bTun = () => (BASS_TUNINGS[S.settings.bassTuning] || BASS_TUNINGS.standard).midi;
 const N = (area) => S.settings.notation[area] || 'en';
-const prog = () => S.progs.find((p) => p.id === S.cur);
+export const prog = () => S.progs.find((p) => p.id === S.cur);
 const bpb = (p) => p.sig[0];
 function accents(p) {
   const [n, d] = p.sig;
@@ -62,7 +68,7 @@ function accents(p) {
   return [];
 }
 const capoOf = (p) => (p.capoOff ? 0 : p.capo || 0);
-const cname = (ch, area = 'editor') => T.chordName(ch, N(area));
+export const cname = (ch, area = 'editor') => T.chordName(ch, N(area));
 function keyOf(p) {
   if (p.key) return { key: p.key, auto: false };
   if (p.chords.length >= 2) {
@@ -71,18 +77,26 @@ function keyOf(p) {
   }
   return { key: null, auto: true };
 }
-function totalBeats(p) {
-  return p.chords.reduce((a, c) => a + c.beats, 0);
-}
+const totalBeats = (p) => p.chords.reduce((a, c) => a + c.beats, 0);
 function fmtDur(p) {
   const sec = Math.round((totalBeats(p) * 60) / p.tempo);
   return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+const isImported = (p) => p.origin === 'import';
+function toVerify(p) {
+  return p.chords.filter((c) => c.conf != null && c.conf < 0.6).length;
+}
+function meanConf(p) {
+  const w = p.chords.filter((c) => c.conf != null);
+  if (!w.length) return null;
+  const tot = p.chords.reduce((a, c) => a + c.beats, 0);
+  return p.chords.reduce((a, c) => a + (c.conf == null ? 1 : c.conf) * c.beats, 0) / tot;
 }
 
 // ---------------------------------------------------------------- persistance
 let saveTimer = null;
 const dirty = new Set();
-function touch(p = prog()) {
+export function touch(p = prog()) {
   if (!p) return;
   p.updated = Date.now();
   S.settings.lastChange = Date.now();
@@ -106,10 +120,11 @@ function saveSettings() {
 window.addEventListener('pagehide', flush);
 document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && flush());
 
-function newProg(name = 'Nouvelle progression') {
+export function newProg(name = 'Nouvelle progression') {
   return {
     id: uid(),
     name,
+    origin: 'compo',
     created: Date.now(),
     updated: Date.now(),
     tempo: 100,
@@ -128,11 +143,11 @@ function newProg(name = 'Nouvelle progression') {
 }
 
 function normalizeProg(p) {
-  const base = newProg();
-  const out = { ...base, ...p };
+  const out = { ...newProg(), ...p };
   out.id = typeof p.id === 'string' ? p.id : uid();
   out.name = String(p.name || 'Sans titre').slice(0, 80);
-  out.tempo = clamp(Number(p.tempo) || 100, 30, 300);
+  out.origin = p.origin === 'import' ? 'import' : 'compo';
+  out.tempo = clamp(Math.round(Number(p.tempo)) || 100, 30, 300);
   out.sig = Array.isArray(p.sig) && SIGS.some((s) => s[0] === p.sig[0] && s[1] === p.sig[1]) ? p.sig : [4, 4];
   if (!IMAP[out.instrument]) out.instrument = 'piano';
   if (!PATTERNS.some((x) => x.id === out.pattern)) out.pattern = 'hold';
@@ -148,12 +163,18 @@ function normalizeProg(p) {
   out.chords = (Array.isArray(p.chords) ? p.chords : [])
     .map((c) => {
       try {
-        const ch = { id: typeof c.id === 'string' ? c.id : uid(), beats: clamp(Math.round(Number(c.beats) || 4), 1, 64), voicing: c.voicing && typeof c.voicing === 'object' ? c.voicing : {} };
+        const ch = {
+          id: typeof c.id === 'string' ? c.id : uid(),
+          beats: clamp(Math.round(Number(c.beats) || 4), 1, 128),
+          voicing: c.voicing && typeof c.voicing === 'object' ? c.voicing : {},
+        };
+        if (typeof c.section === 'string' && c.section) ch.section = c.section.slice(0, 40);
+        if (typeof c.conf === 'number') ch.conf = clamp(c.conf, 0, 1);
         if (c.kind === 'custom') {
           const notes = c.notes.filter((n) => typeof n === 'string');
           notes.forEach(T.parseNote);
           if (!notes.length) return null;
-          const bass = c.bass && notes.includes(c.bass) ? c.bass : notes[0];
+          const bass = c.bass && notes.some((n) => T.pc(n) === T.pc(c.bass)) ? c.bass : notes[0];
           return { ...ch, kind: 'custom', notes, bass, name: String(c.name || '').slice(0, 30) };
         }
         T.parseNote(c.root);
@@ -165,7 +186,22 @@ function normalizeProg(p) {
       }
     })
     .filter(Boolean);
+  if (p.source && typeof p.source === 'object') out.source = p.source;
   return out;
+}
+
+export async function addProgression(p, open = true) {
+  p = normalizeProg(p);
+  S.progs.push(p);
+  await store.put(p);
+  S.settings.lastChange = Date.now();
+  saveSettings();
+  if (open) {
+    S.cur = p.id;
+    S.sel = -1;
+    setTab('compo');
+  }
+  return p;
 }
 
 // ---------------------------------------------------------------- audio / lecture
@@ -177,15 +213,14 @@ function keysVoicing(info) {
 }
 function chordAudio(ch, p) {
   const info = T.chordInfo(ch);
-  const inst = IMAP[p.instrument];
+  const inst = IMAP[p.instrument] || IMAP.piano;
   let midis = null;
   if (inst.kind === 'guitar') {
     const cv = chosenVoicing(ch, capoOf(p), gTun());
     if (cv.voicing) midis = voicingMidi(cv.voicing, gTun(), capoOf(p));
   }
   if (!midis) midis = keysVoicing(info);
-  const bass = 28 + T.mod12(info.bassPc - 28);
-  return { midis, bass, beats: ch.beats };
+  return { midis, bass: 28 + T.mod12(info.bassPc - 28), beats: ch.beats };
 }
 function sequence() {
   const p = prog();
@@ -210,16 +245,16 @@ const player = new Player({
   getSequence: sequence,
   onBeat: (e) => {
     S.play = e;
-    if (S.view === 'editor') updateEditorPlay();
-    if (S.view === 'concert') updateConcertBeat(e);
+    if (S.live) updateConcertBeat(e);
+    else if (S.tab === 'compo') updateEditorPlay();
   },
   onStop: () => {
     S.play = null;
-    if (S.view === 'editor') {
+    if (S.live) renderConcert();
+    else if (S.tab === 'compo') {
       updateEditorPlay();
       setPlayButtons();
     }
-    if (S.view === 'concert') renderConcert();
   },
 });
 
@@ -241,12 +276,11 @@ async function togglePlay(from = 0, countIn = false) {
   setPlayButtons();
 }
 function setPlayButtons(loading) {
-  $$('[data-act="play"]').forEach((b) => {
+  $$('[data-act="play"], [data-act="c-play"]').forEach((b) => {
     b.classList.toggle('on', !!player.playing);
     b.innerHTML = loading ? ICON.dots : player.playing ? ICON.stop : ICON.play;
   });
 }
-
 function preview(ch) {
   const p = prog();
   unlock();
@@ -254,135 +288,56 @@ function preview(ch) {
   previewChord(p ? p.instrument : 'piano', a.midis).catch((e) => toast(e.message));
 }
 
-// ---------------------------------------------------------------- icônes
-const ICON = {
-  play: '<svg viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z" fill="currentColor"/></svg>',
-  stop: '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/></svg>',
-  dots: '<svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="18" cy="12" r="2" fill="currentColor"/></svg>',
-  loop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12"/><path d="M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/></svg>',
-  back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>',
-  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
-  stage: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M10 8.5v5l4.5-2.5z" fill="currentColor"/><path d="M8 21h8"/></svg>',
-  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
-  more: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="19" cy="12" r="2" fill="currentColor"/></svg>',
-  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
-  prev: '<svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z" fill="currentColor"/></svg>',
-  next: '<svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z" fill="currentColor"/></svg>',
-  speaker: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4z" fill="currentColor"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>',
-  left: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>',
-  right: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>',
-};
-
-// ---------------------------------------------------------------- toast & feuilles
-function toast(msg, ms = 2600) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.classList.add('show');
-  clearTimeout(toast.t);
-  toast.t = setTimeout(() => t.classList.remove('show'), ms);
-}
-
-let sheet = null; // { render, onClose }
-function openSheet(render, { onClose, tall = false } = {}) {
-  closeSheet(true);
-  const root = $('#sheet-root');
-  root.innerHTML = `<div class="overlay" data-act="sheet-close"></div><div class="sheet ${tall ? 'tall' : ''}" role="dialog"><div class="grab"></div><button class="sheet-x" data-act="sheet-close" aria-label="Fermer">${ICON.close}</button><div class="sheet-body"></div></div>`;
-  sheet = { render, onClose };
-  renderSheet();
-  requestAnimationFrame(() => root.classList.add('open'));
-}
-function renderSheet() {
-  if (!sheet) return;
-  const body = $('#sheet-root .sheet-body');
-  const st = body.scrollTop;
-  body.innerHTML = sheet.render();
-  body.scrollTop = st;
-}
-function closeSheet(immediate) {
-  const root = $('#sheet-root');
-  if (!sheet) return;
-  const s = sheet;
-  sheet = null;
-  root.classList.remove('open');
-  if (immediate) root.innerHTML = '';
-  else setTimeout(() => !sheet && (root.innerHTML = ''), 220);
-  s.onClose && s.onClose();
-}
-
-function askText(title, value, { placeholder = '', ok = 'OK' } = {}) {
-  return new Promise((resolve) => {
-    let done = false;
-    openSheet(
-      () => `<h2>${esc(title)}</h2>
-      <input class="txt" id="ask-input" value="${esc(value)}" placeholder="${esc(placeholder)}" maxlength="80" autocomplete="off">
-      <div class="row end"><button class="btn ghost" data-act="sheet-close">Annuler</button><button class="btn primary" id="ask-ok">${esc(ok)}</button></div>`,
-      { onClose: () => !done && resolve(null) }
-    );
-    const inp = $('#ask-input');
-    setTimeout(() => {
-      inp.focus();
-      inp.select();
-    }, 60);
-    const submit = () => {
-      done = true;
-      const v = inp.value.trim();
-      closeSheet();
-      resolve(v);
-    };
-    $('#ask-ok').onclick = submit;
-    inp.onkeydown = (e) => {
-      if (e.key === 'Enter') submit();
-    };
-  });
-}
-function confirmBox(title, text, okLabel = 'Supprimer', danger = true) {
-  return new Promise((resolve) => {
-    let done = false;
-    openSheet(
-      () => `<h2>${esc(title)}</h2><p class="muted">${text}</p>
-      <div class="row end"><button class="btn ghost" data-act="sheet-close">Annuler</button><button class="btn ${danger ? 'danger' : 'primary'}" id="cf-ok">${esc(okLabel)}</button></div>`,
-      { onClose: () => !done && resolve(false) }
-    );
-    $('#cf-ok').onclick = () => {
-      done = true;
-      closeSheet();
-      resolve(true);
-    };
-  });
-}
-
 // ---------------------------------------------------------------- navigation
-function go(view, id) {
-  if (player.playing && view !== 'concert' && view !== 'editor') player.stop();
-  if (id !== undefined) S.cur = id;
-  const from = S.view;
-  S.view = view;
-  if (view !== 'editor') S.sel = -1;
-  if (view === 'concert') {
-    keepAwake(true);
-    document.body.classList.add('in-concert');
-  } else {
-    keepAwake(false);
-    document.body.classList.remove('in-concert');
-  }
-  if (from !== view) window.scrollTo(0, 0);
+export function setTab(tab) {
+  if (S.live) exitLive(true);
+  if (player.playing && tab !== S.tab) player.stop();
+  S.tab = tab;
+  window.scrollTo(0, 0);
   render();
 }
-function render() {
-  const app = $('#app');
-  if (S.view === 'gallery') app.innerHTML = viewGallery();
-  else if (S.view === 'editor') app.innerHTML = viewEditor();
-  else if (S.view === 'concert') {
-    app.innerHTML = '<div id="concert"></div>';
-    renderConcert();
-  }
+export function render() {
+  const view = $('#view');
+  document.body.dataset.tab = S.tab;
+  $$('.tabbar [data-tab]').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.tab));
+  if (S.live) return renderConcert();
+  if (S.tab === 'gallery') view.innerHTML = S.importing ? importPage() : viewGallery();
+  else if (S.tab === 'compo') view.innerHTML = viewCompo();
+  else if (S.tab === 'concert') view.innerHTML = viewConcertSetup();
   setPlayButtons();
-  if (S.view === 'editor') updateEditorPlay();
+  if (S.tab === 'compo') updateEditorPlay();
 }
+function refresh() {
+  const y = window.scrollY;
+  render();
+  window.scrollTo(0, y);
+}
+export const app = { render, refresh, setTab, S, prog, cname, toast, addProgression, touch };
 
 // ---------------------------------------------------------------- galerie
+function cardHtml(p) {
+  const mc = meanConf(p);
+  const nv = toVerify(p);
+  const tag = isImported(p)
+    ? `<span class="tag imp">importé${mc != null ? ' · certitude ' + pct(mc) : ''}</span>${nv ? `<span class="tag warn">${nv} à vérifier</span>` : ''}`
+    : '';
+  const secs = [...new Set(p.chords.map((c) => c.section).filter(Boolean))];
+  return `<div class="card" data-act="open" data-id="${p.id}">
+    <div class="card-main">
+      <div class="card-title">${esc(p.name)}</div>
+      <div class="card-chords">${p.chords.length ? esc([...new Set(p.chords.map((c) => cname(c)))].slice(0, 10).join('  ')) : '<i>vide</i>'}</div>
+      <div class="card-meta">${tag}<span>${p.sig.join('/')} · ${p.tempo} bpm · ${p.chords.length} accord${p.chords.length > 1 ? 's' : ''} · ${fmtDur(p)}${secs.length ? ' · ' + secs.length + ' sections' : ''}</span></div>
+    </div>
+    <button class="icon" data-act="card-menu" data-id="${p.id}" aria-label="Options">${ICON.more}</button>
+  </div>`;
+}
 function viewGallery() {
-  const list = S.progs.slice().sort((a, b) => b.updated - a.updated);
+  const mine = S.progs.filter((p) => !isImported(p));
+  const imp = S.progs.filter(isImported);
+  let list = S.gfilter === 'imported' ? imp : mine;
+  const q = S.gsearch.trim().toLowerCase();
+  if (q) list = S.progs.filter((p) => p.name.toLowerCase().includes(q));
+  list = list.slice().sort((a, b) => b.updated - a.updated);
   const needBackup = S.progs.length && S.settings.lastChange > S.settings.lastBackup && Date.now() - S.settings.lastBackup > 14 * 864e5;
   const banners = [];
   if (!isStandalone() && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
@@ -394,30 +349,27 @@ function viewGallery() {
   }
   return `<div class="page gallery">
   <header class="bar">
-    <h1>Progressions</h1>
+    <h1>Galerie</h1>
     <button class="icon" data-act="settings" aria-label="Réglages">${ICON.gear}</button>
   </header>
   ${banners.join('')}
+  <div class="g-tools">
+    <div class="searchbox">${ICON.search}<input type="search" placeholder="Rechercher" value="${esc(S.gsearch)}" data-input="gsearch" autocomplete="off"></div>
+    ${q ? '' : `<div class="seg"><button class="${S.gfilter === 'mine' ? 'on' : ''}" data-act="gfilter" data-v="mine">Mes compos <small>${mine.length}</small></button><button class="${S.gfilter === 'imported' ? 'on' : ''}" data-act="gfilter" data-v="imported">Importés <small>${imp.length}</small></button></div>`}
+  </div>
   <div class="cards">
     ${
       list.length
-        ? list
-            .map(
-              (p) => `<div class="card" data-act="open" data-id="${p.id}">
-      <div class="card-main">
-        <div class="card-title">${esc(p.name)}</div>
-        <div class="card-chords">${p.chords.length ? esc(p.chords.slice(0, 10).map((c) => cname(c)).join('  ')) + (p.chords.length > 10 ? ' …' : '') : '<i>vide</i>'}</div>
-        <div class="card-meta">${p.sig.join('/')} · ${p.tempo} bpm · ${p.chords.length} accord${p.chords.length > 1 ? 's' : ''} · ${fmtDur(p)}</div>
-      </div>
-      <button class="icon" data-act="card-menu" data-id="${p.id}" aria-label="Options">${ICON.more}</button>
-    </div>`
-            )
-            .join('')
-        : `<div class="empty"><p>Aucune progression pour l'instant.</p><p class="muted">Crée ta première grille, ou importe une sauvegarde.</p></div>`
+        ? list.map(cardHtml).join('')
+        : q
+          ? `<div class="empty"><p class="muted">Aucun résultat pour « ${esc(S.gsearch)} ».</p></div>`
+          : S.gfilter === 'imported'
+            ? `<div class="empty"><p>Aucun morceau importé.</p><p class="muted">Importe une grille (texte ou PDF Ultimate Guitar) et, si tu l'as, le fichier audio du morceau : l'app retrouve le rythme.</p><button class="btn primary" data-act="import-song">${ICON.wave}<span>Importer un morceau</span></button></div>`
+            : `<div class="empty"><p>Aucune compo pour l'instant.</p><p class="muted">Crée ta première grille.</p></div>`
     }
   </div>
   <div class="fab-row">
-    <button class="btn ghost" data-act="import">Importer</button>
+    <button class="btn ghost" data-act="import-menu">Importer</button>
     <button class="btn primary big" data-act="new">${ICON.plus}<span>Nouvelle</span></button>
   </div>
 </div>`;
@@ -428,22 +380,23 @@ function cardMenu(id) {
   openSheet(
     () => `<h2>${esc(p.name)}</h2>
     <div class="menu">
+      <button data-act="m-open" data-id="${id}">Ouvrir en compo</button>
       <button data-act="m-concert" data-id="${id}">Mode concert</button>
       <button data-act="m-rename" data-id="${id}">Renommer</button>
       <button data-act="m-dup" data-id="${id}">Dupliquer</button>
+      <button data-act="m-move" data-id="${id}">${isImported(p) ? 'Ranger dans « Mes compos »' : 'Ranger dans « Importés »'}</button>
       <button data-act="m-export" data-id="${id}">Exporter (fichier)</button>
       <button class="danger" data-act="m-delete" data-id="${id}">Supprimer</button>
     </div>`
   );
 }
-
 async function renameProg(id) {
   const p = S.progs.find((x) => x.id === id);
   const v = await askText('Renommer', p.name);
   if (v) {
     p.name = v;
     touch(p);
-    render();
+    refresh();
   }
 }
 function dupProg(id) {
@@ -455,16 +408,16 @@ function dupProg(id) {
   c.chords.forEach((ch) => (ch.id = uid()));
   S.progs.push(c);
   touch(c);
-  render();
+  refresh();
   toast('Copie créée');
 }
 async function deleteProg(id) {
   const p = S.progs.find((x) => x.id === id);
-  if (!(await confirmBox('Supprimer ?', `« ${esc(p.name)} » sera définitivement supprimée de ce téléphone.`))) return;
+  if (!(await confirmBox('Supprimer ?', `« ${esc(p.name)} » sera définitivement supprimée de cet appareil.`))) return;
   S.progs = S.progs.filter((x) => x.id !== id);
   await store.remove(id);
-  if (S.cur === id) go('gallery');
-  else render();
+  if (S.cur === id) S.cur = null;
+  render();
   toast('Progression supprimée');
 }
 const slug = (s) =>
@@ -518,10 +471,9 @@ async function importFile() {
     added++;
   }
   render();
-  toast(`${added} progression${added > 1 ? 's' : ''} importée${added > 1 ? 's' : ''}${skipped ? ` · ${skipped} déjà présente${skipped > 1 ? 's' : ''}` : ''}`, 3500);
+  toast(`${added} progression${added > 1 ? 's' : ''} ajoutée${added > 1 ? 's' : ''}${skipped ? ` · ${skipped} déjà présente${skipped > 1 ? 's' : ''}` : ''}`, 3500);
 }
 
-// ---------------------------------------------------------------- réglages globaux
 function settingsSheet() {
   openSheet(
     () => {
@@ -531,9 +483,9 @@ function settingsSheet() {
       <button class="${st.notation[area] === 'fr' ? 'on' : ''}" data-act="set-not" data-area="${area}" data-v="fr">Do Ré Mi</button></div></div>`;
       return `<h2>Réglages</h2>
       <h3>Notation</h3>
-      ${nsel('editor', 'Éditeur et galerie')}
-      ${nsel('guitar', 'Mode concert : accords / guitare')}
-      ${nsel('bass', 'Mode concert : basse')}
+      ${nsel('editor', 'Compo et galerie')}
+      ${nsel('guitar', 'Concert : accords / guitare')}
+      ${nsel('bass', 'Concert : basse')}
       <h3>Accordages</h3>
       <div class="field"><label>Guitare</label><select data-change="g-tun">${Object.entries(GUITAR_TUNINGS)
         .map(([k, v]) => `<option value="${k}" ${k === st.guitarTuning ? 'selected' : ''}>${v.label}</option>`)
@@ -543,22 +495,32 @@ function settingsSheet() {
         .join('')}</select></div>
       <h3>Sauvegardes</h3>
       <p class="muted small">Dernière sauvegarde : <b>${st.lastBackup ? new Date(st.lastBackup).toLocaleString('fr-FR') : 'jamais'}</b>.
-      Enregistre le fichier dans <b>Fichiers → iCloud Drive</b> : c'est ta vraie assurance contre la perte.</p>
-      <div class="row"><button class="btn primary" data-act="backup">Tout sauvegarder</button><button class="btn" data-act="import">Importer un fichier</button></div>
+      Enregistre le fichier dans <b>Fichiers → iCloud Drive</b> : c'est ta vraie assurance contre la perte.
+      Le même fichier sert à passer tes progressions du téléphone à l'ordinateur (et inversement) : chaque appareil a son propre stockage.</p>
+      <div class="row"><button class="btn primary" data-act="backup">Tout sauvegarder</button><button class="btn" data-act="import-file">Importer un fichier</button></div>
       <h3>Stockage</h3>
-      <p class="muted small">App installée : <b>${isStandalone() ? 'oui' : 'non (ouverte dans Safari)'}</b> · stockage persistant : <b>${esc(S.persist || '…')}</b> · ${S.progs.length} progression(s).</p>
-      <p class="muted small">Ne supprime pas l'icône de l'écran d'accueil : iOS effacerait aussi les données de l'app.</p>
+      <p class="muted small">App installée : <b>${isStandalone() ? 'oui' : 'non (ouverte dans le navigateur)'}</b> · stockage persistant : <b>${esc(S.persist || '…')}</b> · ${S.progs.length} progression(s).</p>
+      <p class="muted small">Sur iPhone, ne supprime pas l'icône de l'écran d'accueil : iOS effacerait aussi les données de l'app.</p>
       <h3>À propos</h3>
-      <p class="muted small">Sons : banque FluidR3 GM (Frank Wen, licence CC BY 3.0), via midi-js-soundfonts. Version ${window.APP_VERSION}.</p>`;
+      <p class="muted small">Sons : FluidR3 GM (Frank Wen, CC BY 3.0). Analyse audio : Essentia.js (MTG-UPF, AGPL-3.0). Lecture PDF : pdf.js (Mozilla, Apache 2.0). Version ${window.APP_VERSION}.</p>`;
     },
     { tall: true }
   );
 }
 
-// ---------------------------------------------------------------- éditeur
-function viewEditor() {
+// ---------------------------------------------------------------- compo
+function viewCompo() {
   const p = prog();
-  if (!p) return viewGallery();
+  if (!p) {
+    const recent = S.progs.slice().sort((a, b) => b.updated - a.updated).slice(0, 5);
+    return `<div class="page compo">
+      <header class="bar"><h1>Compo</h1></header>
+      <div class="empty big-empty">
+        <p>Aucune progression ouverte.</p>
+        <div class="row center"><button class="btn primary big" data-act="new">${ICON.plus}<span>Nouvelle</span></button></div>
+        ${recent.length ? `<h3>Reprendre</h3><div class="cards">${recent.map(cardHtml).join('')}</div>` : ''}
+      </div></div>`;
+  }
   const { key, auto } = keyOf(p);
   const sugg = suggestCapo(p.chords, gTun());
   const capoNote =
@@ -568,12 +530,25 @@ function viewEditor() {
         ? `<button class="chip hint" data-act="capo-sheet">Capo ${sugg.fret} conseillé</button>`
         : `<button class="chip" data-act="capo-sheet">Sans capo</button>`;
   const perRow = bpb(p) * (bpb(p) >= 6 ? 2 : 4);
-  return `<div class="page editor">
+  const nv = toVerify(p);
+  const mc = meanConf(p);
+  let lastSec = null;
+  const blocks = p.chords
+    .map((c, i) => {
+      let head = '';
+      if (c.section && c.section !== lastSec) head = `<div class="sec-head" data-act="sec-rename" data-i="${i}">${esc(c.section)}</div>`;
+      lastSec = c.section || lastSec;
+      const cc = confClass(c.conf);
+      const badge = c.conf != null && c.conf < 0.85 ? `<span class="blk-conf">${Math.round(c.conf * 100)}%</span>` : '';
+      return `${head}<div class="blk ${i === S.sel ? 'sel' : ''} ${key && !T.chordInKey(c, key) ? 'out' : ''} ${cc}" data-act="sel" data-i="${i}" style="--beats:${c.beats}">
+        <span class="blk-name">${esc(cname(c))}</span><span class="blk-dur">${durLabel(c.beats, p)}</span>${badge}<span class="blk-prog"></span></div>`;
+    })
+    .join('');
+  return `<div class="page compo">
   <header class="bar">
-    <button class="icon" data-act="back" aria-label="Retour">${ICON.back}</button>
+    <button class="icon" data-act="close-cur" aria-label="Fermer">${ICON.back}</button>
     <h1 class="title" data-act="rename-cur">${esc(p.name)}</h1>
     <button class="icon" data-act="prog-settings" aria-label="Réglages du morceau">${ICON.gear}</button>
-    <button class="icon accent" data-act="concert" aria-label="Mode concert">${ICON.stage}</button>
   </header>
   <div class="transport">
     <button class="play" data-act="play" aria-label="Lecture">${ICON.play}</button>
@@ -585,33 +560,31 @@ function viewEditor() {
   <div class="chips">
     <button class="chip ${key && !auto ? 'on' : ''}" data-act="key-sheet">Gamme : ${key ? T.keyName(key, N('editor')) + (auto ? ' <i>(suggérée)</i>' : '') : '—'}</button>
     ${capoNote}
+    ${mc != null ? `<button class="chip ${nv ? 'warn' : 'ok'}" data-act="next-verify">Certitude ${pct(mc)}${nv ? ` · ${nv} à vérifier` : ' ✓'}</button>` : ''}
   </div>
-  <div class="timeline" style="--per-row:${perRow}">
-    ${p.chords
-      .map(
-        (c, i) => `<div class="blk ${i === S.sel ? 'sel' : ''} ${key && !T.chordInKey(c, key) ? 'out' : ''}" data-act="sel" data-i="${i}" style="--beats:${c.beats}">
-        <span class="blk-name">${esc(cname(c))}</span><span class="blk-dur">${durLabel(c.beats, p)}</span><span class="blk-prog"></span></div>`
-      )
-      .join('')}
-    <button class="blk add" data-act="add-chord" aria-label="Ajouter un accord">${ICON.plus}</button>
+  <div class="compo-grid">
+    <div class="compo-main">
+      <div class="timeline" style="--per-row:${perRow}">
+        ${blocks}
+        <button class="blk add" data-act="add-chord" aria-label="Ajouter un accord">${ICON.plus}</button>
+      </div>
+      <div class="tl-meta muted small">${p.chords.length ? `${(totalBeats(p) / bpb(p)).toFixed(totalBeats(p) % bpb(p) ? 1 : 0)} mesures · ${fmtDur(p)} · appui long sur un accord pour le déplacer` : 'Touche + pour ajouter ton premier accord.'}</div>
+    </div>
+    <aside class="compo-side">${S.sel >= 0 && p.chords[S.sel] ? selPanel(p, S.sel) : `<div class="side-hint muted small">Touche un accord pour le modifier.</div>`}</aside>
   </div>
-  <div class="tl-meta muted small">${p.chords.length ? `${(totalBeats(p) / bpb(p)).toFixed(totalBeats(p) % bpb(p) ? 1 : 0)} mesures · ${fmtDur(p)} · appui long sur un accord pour le déplacer` : 'Touche + pour ajouter ton premier accord.'}</div>
-  ${S.sel >= 0 && p.chords[S.sel] ? selPanel(p, S.sel) : ''}
 </div>`;
 }
-
 function durLabel(beats, p) {
   const b = bpb(p);
   if (beats % b === 0) return `${beats / b} mes.`;
   return `${beats} t`;
 }
-
 function diagramBlock(ch, p, { small = false, notation = 'guitar' } = {}) {
   const capo = capoOf(p);
   const cv = chosenVoicing(ch, capo, gTun());
   const info = T.chordInfo(ch);
   let note = '';
-  if (!cv.voicing) note = `<div class="dnote bad">Aucune position jouable à une main. Joue les notes : ${info.tones.map((t) => T.displayNote(t.name, N(notation))).join(' · ')}</div>`;
+  if (!cv.voicing) note = `<div class="dnote bad">Aucune position jouable à une main. Notes : ${info.tones.map((t) => T.displayNote(t.name, N(notation))).join(' · ')}</div>`;
   else if (!cv.complete) {
     const miss = (cv.voicing.missing || []).map((pc) => {
       const t = info.tones.find((x) => x.pc === pc);
@@ -625,18 +598,23 @@ function diagramBlock(ch, p, { small = false, notation = 'guitar' } = {}) {
   const shapeName = capo ? `<div class="shape">capo ${capo} · forme ${esc(T.chordName(cv.shape, N(notation)))}</div>` : '';
   return `<div class="diag ${small ? 'small' : ''}">${shapeName}${guitarDiagram(cv.voicing, { capo, fingers: !small })}${note}</div>`;
 }
-
 function selPanel(p, i) {
   const ch = p.chords[i];
   const cv = chosenVoicing(ch, capoOf(p), gTun());
   const info = T.chordInfo(ch);
   const b = bpb(p);
+  const conf =
+    ch.conf != null
+      ? `<div class="conf-row ${confClass(ch.conf)}"><span>Certitude estimée : <b>${pct(ch.conf)}</b>${ch.conf < 0.6 ? ' — à vérifier' : ''}</span><button class="btn small" data-act="verify">${ICON.check}<span>Vérifié</span></button></div>`
+      : '';
   return `<div class="selpanel">
+    ${ch.section ? `<div class="sp-sec">${esc(ch.section)}</div>` : ''}
     <div class="sp-head">
       <div><div class="sp-name">${esc(cname(ch))}</div>
       <div class="muted small">${info.tones.map((t) => `${T.displayNote(t.name, N('editor'))}<sup>${t.label}</sup>`).join(' ')}</div></div>
       <button class="icon" data-act="preview-sel" aria-label="Écouter">${ICON.speaker}</button>
     </div>
+    ${conf}
     <div class="sp-body">
       <div class="sp-diag">${diagramBlock(ch, p, { notation: 'editor' })}
         ${cv.voicings.length > 1 ? `<div class="pos"><button class="icon sm" data-act="vpos" data-d="-1">${ICON.left}</button><span>position ${cv.index + 1}/${cv.voicings.length}</span><button class="icon sm" data-act="vpos" data-d="1">${ICON.right}</button></div>` : ''}
@@ -658,19 +636,24 @@ function selPanel(p, i) {
     </div>
   </div>`;
 }
-
 function updateEditorPlay() {
   const e = S.play;
-  $$('.timeline .blk').forEach((el) => {
+  $$('.timeline .blk[data-i]').forEach((el) => {
     const i = Number(el.dataset.i);
     const on = e && !e.countIn && e.chordIdx === i;
     el.classList.toggle('playing', !!on);
     const bar = $('.blk-prog', el);
     if (bar) bar.style.width = on ? `${((e.beatInChord + 1) / e.chordBeats) * 100}%` : '0';
+    if (on && !el.dataset.seen) {
+      el.dataset.seen = 1;
+      const r = el.getBoundingClientRect();
+      if (r.bottom > innerHeight - 90 || r.top < 60) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } else if (!on) delete el.dataset.seen;
   });
 }
 
 // --- glisser-déposer (appui long)
+let suppressClick = false;
 function setupDrag() {
   let timer = null,
     drag = null,
@@ -684,7 +667,7 @@ function setupDrag() {
     'pointerdown',
     (e) => {
       const blk = e.target.closest('.timeline .blk[data-i]');
-      if (!blk || S.view !== 'editor') return;
+      if (!blk || S.tab !== 'compo' || S.live) return;
       startX = e.clientX;
       startY = e.clientY;
       cancel();
@@ -697,7 +680,7 @@ function setupDrag() {
         ghost.style.height = r.height + 'px';
         document.body.appendChild(ghost);
         blk.classList.add('dragging');
-        drag = { from: Number(blk.dataset.i), blk, ghost, dx: startX - r.left, dy: startY - r.top, to: Number(blk.dataset.i) };
+        drag = { from: Number(blk.dataset.i), ghost, dx: startX - r.left, dy: startY - r.top, to: Number(blk.dataset.i) };
         moveGhost(startX, startY);
         if (navigator.vibrate) navigator.vibrate(15);
       }, 380);
@@ -718,8 +701,7 @@ function setupDrag() {
     blks.forEach((b) => b.classList.remove('ins-before', 'ins-after'));
     if (best) {
       let to = best.i + (best.after ? 1 : 0);
-      const tgt = blks[best.i];
-      tgt.classList.add(best.after ? 'ins-after' : 'ins-before');
+      blks[best.i].classList.add(best.after ? 'ins-after' : 'ins-before');
       if (to > drag.from) to--;
       drag.to = to;
     }
@@ -754,7 +736,7 @@ function setupDrag() {
     }
     suppressClick = true;
     setTimeout(() => (suppressClick = false), 50);
-    render();
+    refresh();
   };
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
@@ -762,20 +744,19 @@ function setupDrag() {
     if (e.target.closest('.timeline')) e.preventDefault();
   });
 }
-let suppressClick = false;
 
 // --- feuilles de réglage du morceau
 function tempoSheet() {
   const p = prog();
   let taps = [];
-  openSheet(
+  const sh = openSheet(
     () => `<h2>Tempo</h2>
     <div class="tempo-big"><button data-act="tempo" data-d="-5">−5</button><button data-act="tempo" data-d="-1">−</button><b>${p.tempo}</b><button data-act="tempo" data-d="1">+</button><button data-act="tempo" data-d="5">+5</button></div>
     <input type="range" min="30" max="260" value="${p.tempo}" data-input="tempo-range" class="range">
     <button class="btn wide" id="tap">Tap tempo (tape en rythme)</button>
     <p class="muted small">${p.sig[1] === 8 ? 'En x/8, le tempo compte les croches.' : 'Le tempo compte les noires.'}</p>`
   );
-  const bind = () => {
+  sh.after = () => {
     const tap = $('#tap');
     if (!tap) return;
     tap.onpointerdown = () => {
@@ -790,27 +771,15 @@ function tempoSheet() {
       }
     };
   };
-  bind();
-  sheet.after = bind;
+  sh.after();
 }
 function setTempo(v) {
   const p = prog();
   p.tempo = clamp(v, 30, 260);
   touch(p);
   renderSheet();
-  sheet && sheet.after && sheet.after();
-  refreshEditorBg();
+  refresh();
 }
-function refreshEditorBg() {
-  if (S.view === 'editor') {
-    const y = window.scrollY;
-    $('#app').innerHTML = viewEditor();
-    setPlayButtons();
-    updateEditorPlay();
-    window.scrollTo(0, y);
-  } else if (S.view === 'concert') renderConcert();
-}
-
 function sigSheet() {
   const p = prog();
   openSheet(
@@ -828,6 +797,7 @@ function instSheet() {
     <div class="list">${PATTERNS.map((x) => `<button class="${p.pattern === x.id ? 'on' : ''}" data-act="pattern" data-v="${x.id}">${x.label} <small class="muted">${x.hint}</small></button>`).join('')}</div>`
   );
 }
+const tog = (k, label, on, act = 'tog') => `<button class="tog ${on ? 'on' : ''}" data-act="${act}" data-k="${k}"><span>${label}</span><i></i></button>`;
 function progSettingsSheet() {
   const p = prog();
   openSheet(
@@ -836,15 +806,14 @@ function progSettingsSheet() {
       ${tog('loop', 'Lecture en boucle', p.loop)}
       ${tog('metronome', 'Clic de métronome', p.metronome)}
       ${tog('bassRoot', 'Basse sur la fondamentale', p.bassRoot)}
-      ${tog('countIn', 'Décompte d’une mesure (mode concert)', p.countIn)}
+      ${tog('countIn', 'Décompte d’une mesure (concert)', p.countIn)}
     </div>
     <div class="row"><button class="btn" data-act="tempo-sheet">Tempo : ${p.tempo}</button><button class="btn" data-act="sig-sheet">Mesure : ${p.sig.join('/')}</button></div>
     <div class="row"><button class="btn" data-act="inst-sheet">${esc(IMAP[p.instrument].label)}</button><button class="btn" data-act="capo-sheet">Capo : ${p.capo || 'aucun'}</button></div>
-    <div class="row"><button class="btn" data-act="key-sheet">Gamme</button><button class="btn" data-act="m-export" data-id="${p.id}">Exporter</button></div>`
+    <div class="row"><button class="btn" data-act="key-sheet">Gamme</button><button class="btn" data-act="m-export" data-id="${p.id}">Exporter</button></div>
+    ${p.source ? `<p class="muted small">Importé ${p.source.audio ? 'avec l’audio « ' + esc(p.source.audio) + ' »' : 'sans audio'} le ${new Date(p.created).toLocaleDateString('fr-FR')}.</p>` : ''}`
   );
 }
-const tog = (k, label, on) => `<button class="tog ${on ? 'on' : ''}" data-act="tog" data-k="${k}"><span>${label}</span><i></i></button>`;
-
 function capoSheet() {
   const p = prog();
   const sugg = suggestCapo(p.chords, gTun());
@@ -852,16 +821,14 @@ function capoSheet() {
     () => `<h2>Capodastre</h2>
     ${sugg.fret ? `<p>Suggestion : <b>capo ${sugg.fret}</b> — positions plus ouvertes et plus simples.</p>` : `<p class="muted">Pas de capo particulièrement utile pour cette grille.</p>`}
     <div class="grid4">${[0, 1, 2, 3, 4, 5, 6, 7].map((f) => `<button class="opt ${(p.capo || 0) === f ? 'on' : ''} ${sugg.fret === f && f ? 'hint' : ''}" data-act="capo" data-v="${f}">${f ? 'Capo ' + f : 'Aucun'}</button>`).join('')}</div>
-    <p class="muted small">En mode concert, un bouton permet de basculer « avec / sans capo » si tu n'en as pas ce jour-là : les diagrammes se recalculent.</p>`
+    <p class="muted small">En concert, un bouton permet de basculer « avec / sans capo » si tu n'en as pas ce jour-là : les diagrammes se recalculent.</p>`
   );
 }
-
 function keySheet() {
   const p = prog();
   const { key, auto } = keyOf(p);
-  const acc = key && T.keyAccPref(key) === 'flat' ? 'b' : '#';
-  const st = { tonic: key ? key.tonic : 'C', mode: key ? key.mode : 'major', acc };
-  openSheet(() => {
+  const st = { tonic: key ? key.tonic : 'C', mode: key ? key.mode : 'major', acc: key && T.keyAccPref(key) === 'flat' ? 'b' : '#' };
+  const sh = openSheet(() => {
     const cur = p.key;
     return `<h2>Gamme du morceau</h2>
     <p class="muted small">Sert à proposer en priorité les accords de la gamme. Rien n'est interdit : les accords hors gamme restent toujours disponibles.</p>
@@ -872,9 +839,8 @@ function keySheet() {
     <div class="grid3">${T.SCALES.map((s) => `<button class="opt ${cur && cur.mode === s.id ? 'on' : ''}" data-act="key-mode" data-v="${s.id}">${s.label}</button>`).join('')}</div>
     ${cur ? `<p class="small">Gamme choisie : <b>${T.keyName(cur, N('editor'))}</b> — ${T.scaleNotes(cur).map((n) => T.displayNote(n, N('editor'))).join(' ')}</p>` : ''}`;
   });
-  sheet.st = st;
+  sh.st = st;
 }
-
 function rootGrid(selected, acc, act, keyForHighlight) {
   const inKey = keyForHighlight ? new Set(T.SMAP[keyForHighlight.mode].steps.map((s) => T.mod12(T.pc(keyForHighlight.tonic) + s))) : null;
   const selPc = selected ? T.pc(selected) : -1;
@@ -894,7 +860,7 @@ function chordSheet(editIndex = -1) {
   const p = prog();
   const { key } = keyOf(p);
   const ex = editIndex >= 0 ? p.chords[editIndex] : null;
-  const acc = key && T.keyAccPref(key) === 'flat' ? 'b' : '#';
+  const prevSec = ex ? ex.section : S.sel >= 0 && p.chords[S.sel] ? p.chords[S.sel].section : p.chords.length ? p.chords[p.chords.length - 1].section : '';
   const cs = {
     editIndex,
     mode: ex ? ex.kind : 'std',
@@ -905,15 +871,16 @@ function chordSheet(editIndex = -1) {
     cbass: ex && ex.kind === 'custom' ? ex.bass : null,
     name: ex && ex.kind === 'custom' ? ex.name || '' : '',
     beats: ex ? ex.beats : bpb(p),
-    acc,
+    section: prevSec || '',
+    acc: key && T.keyAccPref(key) === 'flat' ? 'b' : '#',
     sevenths: false,
     otherBass: false,
   };
-  if (!ex && key && cs.root !== key.tonic) cs.root = key.tonic;
   if (!ex && key && ['minor', 'harmonic', 'dorian', 'phrygian'].includes(key.mode)) cs.quality = 'm';
-  openSheet(() => renderChordSheet(cs), { tall: true });
-  sheet.cs = cs;
-  bindChordName();
+  const sh = openSheet(() => renderChordSheet(cs), { tall: true });
+  sh.cs = cs;
+  sh.after = bindChordInputs;
+  bindChordInputs();
 }
 function csChord(cs) {
   if (cs.mode === 'custom') {
@@ -960,15 +927,12 @@ function renderChordSheet(cs) {
     body = `<p class="muted small">Touche les notes de ton accord (ordre libre), puis choisis la note de basse.</p>
     ${keyboard(cs)}
     <div class="accsw"><span class="small muted">touches noires :</span><button class="${cs.acc === '#' ? 'on' : ''}" data-act="acc" data-v="#">♯</button><button class="${cs.acc === 'b' ? 'on' : ''}" data-act="acc" data-v="b">♭</button></div>
-    ${
-      cs.notes.length
-        ? `<h3>Basse</h3><div class="quals">${cs.notes.map((n) => `<button class="opt ${(cs.cbass || cs.notes[0]) === n ? 'on' : ''}" data-act="cs-cbass" data-v="${n}">${T.displayNote(n, N('editor'))}</button>`).join('')}</div>`
-        : ''
-    }
+    ${cs.notes.length ? `<h3>Basse</h3><div class="quals">${cs.notes.map((n) => `<button class="opt ${(cs.cbass || cs.notes[0]) === n ? 'on' : ''}" data-act="cs-cbass" data-v="${n}">${T.displayNote(n, N('editor'))}</button>`).join('')}</div>` : ''}
     <p class="small">${cs.notes.length < 2 ? '' : rec ? `Reconnu : <b>${esc(T.chordName({ kind: 'std', ...rec }, N('editor')))}</b>` : 'Accord non répertorié — tu peux lui donner un nom :'}</p>
     <input class="txt" id="cs-name" placeholder="Nom personnalisé (facultatif)" value="${esc(cs.name)}" maxlength="30">`;
   }
   const b = bpb(p);
+  const secs = [...new Set(p.chords.map((c) => c.section).filter(Boolean))];
   return `<div class="cs-head">
       <div class="seg"><button class="${cs.mode === 'std' ? 'on' : ''}" data-act="cs-mode" data-v="std">Répertoire</button><button class="${cs.mode === 'custom' ? 'on' : ''}" data-act="cs-mode" data-v="custom">Notes</button></div>
     </div>
@@ -978,9 +942,10 @@ function renderChordSheet(cs) {
     ${body}
     <h3>Durée</h3>
     <div class="row"><div class="stepper"><button data-act="cs-dur" data-d="-1">−</button><span><b>${cs.beats}</b> temps</span><button data-act="cs-dur" data-d="1">+</button></div>
-    <div class="quick">${[1, 2, 4]
-      .map((m) => `<button class="${cs.beats === b * m ? 'on' : ''}" data-act="cs-dur-set" data-v="${b * m}">${m} mes.</button>`)
-      .join('')}</div></div>
+    <div class="quick">${[1, 2, 4].map((m) => `<button class="${cs.beats === b * m ? 'on' : ''}" data-act="cs-dur-set" data-v="${b * m}">${m} mes.</button>`).join('')}</div></div>
+    <h3>Section <small class="muted">(facultatif)</small></h3>
+    <input class="txt" id="cs-section" list="sec-list" placeholder="Couplet, Refrain…" value="${esc(cs.section)}" maxlength="40">
+    <datalist id="sec-list">${[...new Set([...secs, 'Intro', 'Couplet', 'Pré-refrain', 'Refrain', 'Pont', 'Solo', 'Outro'])].map((s) => `<option value="${esc(s)}">`).join('')}</datalist>
     <div class="cs-foot"><button class="btn ghost" data-act="sheet-close">Annuler</button><button class="btn primary" data-act="cs-ok" ${ch ? '' : 'disabled'}>${cs.editIndex >= 0 ? 'Valider' : 'Ajouter'}</button></div>`;
 }
 function keyboard(cs) {
@@ -995,46 +960,105 @@ function keyboard(cs) {
     .join('');
   return `<div class="kbd">${whites}${blacks}</div>`;
 }
-function bindChordName() {
+function bindChordInputs() {
+  const sh = currentSheet();
+  if (!sh || !sh.cs) return;
   const inp = $('#cs-name');
-  if (inp && sheet && sheet.cs) {
+  if (inp) {
     inp.oninput = () => {
-      sheet.cs.name = inp.value;
+      sh.cs.name = inp.value;
       const n = $('.cs-pv-name');
-      const ch = csChord(sheet.cs);
+      const ch = csChord(sh.cs);
       if (n && ch) n.textContent = cname(ch);
     };
   }
-}
-function rerenderChordSheet() {
-  renderSheet();
-  bindChordName();
+  const sec = $('#cs-section');
+  if (sec) sec.oninput = () => (sh.cs.section = sec.value);
 }
 function commitChord() {
-  const cs = sheet.cs;
+  const cs = currentSheet().cs;
   const p = prog();
   const ch = csChord(cs);
   if (!ch) return;
+  const section = cs.section.trim() || undefined;
   if (cs.editIndex >= 0) {
     const old = p.chords[cs.editIndex];
     const same = JSON.stringify([old.kind, old.root, old.quality, old.bass, old.notes]) === JSON.stringify([ch.kind, ch.root, ch.quality, ch.bass, ch.notes]);
-    p.chords[cs.editIndex] = { ...ch, id: old.id, beats: cs.beats, voicing: same ? old.voicing : {} };
+    p.chords[cs.editIndex] = { ...ch, id: old.id, beats: cs.beats, voicing: same ? old.voicing : {}, section };
     S.sel = cs.editIndex;
   } else {
     const at = S.sel >= 0 ? S.sel + 1 : p.chords.length;
-    p.chords.splice(at, 0, { ...ch, id: uid(), beats: cs.beats, voicing: {} });
+    p.chords.splice(at, 0, { ...ch, id: uid(), beats: cs.beats, voicing: {}, section });
     S.sel = at;
   }
   touch(p);
   closeSheet();
-  refreshEditorBg();
+  refresh();
   requestAnimationFrame(() => {
     const el = $('.timeline .blk.sel');
     if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   });
 }
 
-// ---------------------------------------------------------------- mode concert
+// ---------------------------------------------------------------- concert : préparation
+function viewConcertSetup() {
+  const p = prog();
+  const c = S.settings.concert;
+  const list = S.progs.slice().sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+  const sugg = p ? suggestCapo(p.chords, gTun()) : { fret: 0 };
+  const capoTarget = p ? p.capo || sugg.fret : 0;
+  return `<div class="page concert-setup">
+  <header class="bar"><h1>Concert</h1></header>
+  <div class="cs-grid">
+  <section class="panel">
+    <h3>Morceau</h3>
+    ${
+      list.length
+        ? `<select class="songsel" data-change="concert-song"><option value="" ${p ? '' : 'selected'} disabled>Choisir un morceau…</option>${list
+            .map((x) => `<option value="${x.id}" ${p && x.id === p.id ? 'selected' : ''}>${esc(x.name)}${isImported(x) ? ' (importé)' : ''}</option>`)
+            .join('')}</select>`
+        : `<p class="muted">Aucune progression : crée-en une dans Compo ou importe un morceau dans Galerie.</p>`
+    }
+    ${
+      p
+        ? `<div class="song-sum">
+        <div class="ss-chords">${esc([...new Set(p.chords.map((x) => cname(x, 'guitar')))].join('  '))}</div>
+        <div class="muted small">${p.tempo} bpm · ${p.sig.join('/')} · ${p.chords.length} accords · ${fmtDur(p)}${toVerify(p) ? ` · <span class="warn-t">${toVerify(p)} accord(s) à vérifier</span>` : ''}</div>
+      </div>
+      <div class="toggles">
+        ${tog('countIn', 'Décompte d’une mesure', p.countIn)}
+        ${tog('loop', 'Boucle', p.loop)}
+        ${tog('metronome', 'Clic de métronome', p.metronome)}
+        ${capoTarget ? tog('capoUse', `Capo ${capoTarget}${p.capo ? '' : ' (conseillé)'}`, !!capoOf(p), 'capo-use') : ''}
+      </div>`
+        : ''
+    }
+  </section>
+  <section class="panel">
+    <h3>Affichage</h3>
+    <div class="presets">${Object.entries(CONCERT_PRESETS)
+      .map(([k, v]) => `<button class="opt ${c.preset === k ? 'on' : ''}" data-act="c-preset" data-v="${k}">${v.label}</button>`)
+      .join('')}<button class="opt ${c.preset === 'custom' ? 'on' : ''}" data-act="c-custom">Sur mesure</button></div>
+    <div class="toggles ${c.preset === 'custom' ? '' : 'compact'}">
+      <div class="tg-title">Accord en cours</div>
+      ${tog('guitar', 'Diagramme guitare', c.guitar, 'c-tog')}
+      ${tog('bass', 'Manche de basse', c.bass, 'c-tog')}
+      ${c.bass ? tog('shortNeck', 'Manche court (cases 0 à 7, plus gros)', c.shortNeck, 'c-tog') + tog('nextRootMark', 'Repère vert : basse de l’accord suivant', c.nextRootMark, 'c-tog') : ''}
+      <div class="tg-title">Accord suivant</div>
+      ${tog('next', 'Afficher l’accord suivant', c.next, 'c-tog')}
+      ${c.next ? tog('nextGuitar', 'Diagramme guitare (suivant)', c.nextGuitar, 'c-tog') + tog('nextBass', 'Manche de basse (suivant)', c.nextBass, 'c-tog') : ''}
+      <div class="tg-title">Repères</div>
+      ${tog('pulse', 'Pulsation (temps qui s’allument)', c.pulse, 'c-tog')}
+      ${tog('tempo', 'Tempo affiché', c.tempo, 'c-tog')}
+      ${tog('section', 'Nom de la section', c.section, 'c-tog')}
+    </div>
+  </section>
+  </div>
+  <div class="fab-row"><button class="btn primary big" data-act="go-live" ${p && p.chords.length ? '' : 'disabled'}>${ICON.stage}<span>Lancer le concert</span></button></div>
+</div>`;
+}
+
+// ---------------------------------------------------------------- concert : scène
 let wake = null;
 async function keepAwake(on) {
   try {
@@ -1052,52 +1076,139 @@ async function keepAwake(on) {
   }
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && S.view === 'concert') keepAwake(true);
+  if (document.visibilityState === 'visible' && S.live) keepAwake(true);
 });
-
+function goLive() {
+  const p = prog();
+  if (!p || !p.chords.length) return;
+  S.live = true;
+  S.concertIdx = clamp(S.concertIdx, 0, p.chords.length - 1);
+  document.body.classList.add('in-concert');
+  keepAwake(true);
+  $('#view').innerHTML = '';
+  renderConcert();
+}
+function exitLive(silent) {
+  if (player.playing) player.stop();
+  S.live = false;
+  document.body.classList.remove('in-concert');
+  $('#live').innerHTML = '';
+  keepAwake(false);
+  if (!silent) render();
+}
 function concertIdx() {
   const p = prog();
   if (S.play && S.play.chordIdx != null) return S.play.chordIdx;
   return clamp(S.concertIdx, 0, Math.max(0, p.chords.length - 1));
 }
+function liveLayout(c, wide) {
+  const B = c.bass,
+    Nx = c.next,
+    NB = c.next && c.nextBass;
+  let areas, cols, rows;
+  const short = innerHeight < 600;
+  if (wide && short && B) {
+    // paysage sur téléphone : trois colonnes, la basse à droite
+    if (Nx) {
+      areas = NB ? "'cur next bass' 'cur next nbass'" : "'cur next bass'";
+      cols = c.guitar || c.nextGuitar ? '1fr .75fr 1.5fr' : '.8fr .6fr 2fr';
+      rows = NB ? 'minmax(0,1fr) minmax(0,1fr)' : 'minmax(0,1fr)';
+    } else {
+      areas = "'cur bass'";
+      cols = '1fr 1.6fr';
+      rows = 'minmax(0,1fr)';
+    }
+  } else if (wide) {
+    if (B && Nx) {
+      areas = NB ? "'cur next' 'bass nbass'" : "'cur next' 'bass bass'";
+      cols = NB ? '1.4fr 1fr' : '1.5fr 1fr';
+      rows = 'minmax(0,1fr) auto';
+    } else if (B) {
+      areas = "'cur bass'";
+      cols = '1fr 1.4fr';
+      rows = 'minmax(0,1fr)';
+    } else if (Nx) {
+      areas = "'cur next'";
+      cols = '1.5fr 1fr';
+      rows = 'minmax(0,1fr)';
+    } else {
+      areas = "'cur'";
+      cols = '1fr';
+      rows = 'minmax(0,1fr)';
+    }
+  } else {
+    const r = [Nx ? "'cur next'" : "'cur cur'"];
+    const rr = ['minmax(130px,1fr)'];
+    if (B) {
+      r.push("'bass bass'");
+      rr.push('auto');
+    }
+    if (NB) {
+      r.push("'nbass nbass'");
+      rr.push('auto');
+    }
+    areas = r.join(' ');
+    cols = Nx ? '1.35fr 1fr' : '1fr 0';
+    rows = rr.join(' ');
+  }
+  return `grid-template-areas:${areas};grid-template-columns:${cols};grid-template-rows:${rows}`;
+}
+function bassBlock(ch, compact, next) {
+  const info = T.chordInfo(ch);
+  const c = S.settings.concert;
+  let nextRoot = null;
+  if (next && !compact && c.nextRootMark) {
+    const ni = T.chordInfo(next);
+    nextRoot = { pc: ni.bassPc, name: ni.bassName };
+  }
+  const notes = info.tones.map((t) => `<span class="${t.pc === info.rootPc ? 'r' : ''}">${T.displayNote(t.name, N('bass'))}</span>`).join('');
+  return `<div class="b-head"><span class="b-notes">${notes}</span>${info.bassPc !== info.rootPc ? `<span class="b-slash">basse : ${T.displayNote(info.bassName, N('bass'))}</span>` : ''}
+    ${compact ? '' : `<button class="mini" data-act="bass-labels">${S.settings.bassLabels === 'notes' ? 'notes' : 'degrés'}</button>`}</div>
+    ${bassNeck({ tones: info.tones, rootPc: info.rootPc, bassPc: info.bassPc, tuning: bTun(), notation: N('bass'), labels: S.settings.bassLabels, frets: c.shortNeck ? 7 : 12, nextRoot })}
+    ${nextRoot && nextRoot.pc !== info.rootPc ? `<div class="b-legend"><i></i>basse suivante : ${T.displayNote(nextRoot.name, N('bass'))}</div>` : ''}`;
+}
 function renderConcert() {
   const p = prog();
-  const el = $('#concert');
+  const el = $('#live');
   if (!el || !p) return;
+  const c = S.settings.concert;
   const idx = concertIdx();
   const ch = p.chords[idx];
   const nextIdx = idx + 1 < p.chords.length ? idx + 1 : p.loop ? 0 : -1;
   const nx = nextIdx >= 0 && p.chords.length > 1 ? p.chords[nextIdx] : null;
   const b = bpb(p);
+  const wide = innerWidth > innerHeight * 1.15 || innerWidth >= 1000;
   const sugg = suggestCapo(p.chords, gTun());
   const capoTarget = p.capo || sugg.fret;
-  const capoBtn = capoTarget
-    ? `<button class="cbtn ${capoOf(p) ? 'on' : ''}" data-act="capo-toggle">${capoOf(p) ? `Capo ${capoOf(p)}` : `Sans capo`}</button>`
-    : '';
-  let bassHtml = '';
-  if (ch) {
-    const info = T.chordInfo(ch);
-    const notes = info.tones.map((t) => `<span class="${t.pc === info.rootPc ? 'r' : ''}">${T.displayNote(t.name, N('bass'))}</span>`).join('');
-    bassHtml = `<div class="b-head"><span class="b-notes">${notes}</span>${info.bassPc !== info.rootPc ? `<span class="b-slash">basse : ${T.displayNote(info.bassName, N('bass'))}</span>` : ''}
-      <button class="mini" data-act="bass-labels">${S.settings.bassLabels === 'notes' ? 'notes' : 'degrés'}</button></div>
-      ${bassNeck({ tones: info.tones, rootPc: info.rootPc, bassPc: info.bassPc, tuning: bTun(), notation: N('bass'), labels: S.settings.bassLabels })}`;
-  }
-  el.innerHTML = `<div class="concert">
+  const showGuitarStuff = c.guitar || (c.next && c.nextGuitar);
+  const capoBtn = capoTarget && showGuitarStuff ? `<button class="cbtn ${capoOf(p) ? 'on' : ''}" data-act="capo-toggle">${capoOf(p) ? `Capo ${capoOf(p)}` : `Sans capo`}</button>` : '';
+  const namesOnly = !c.guitar && !c.bass;
+  el.innerHTML = `<div class="concert ${namesOnly ? 'names-only' : ''} ${wide ? 'wide' : 'tall'} ${c.bass && c.next && c.nextBass ? 'two-necks' : ''}">
     <header class="c-top">
       <button class="cbtn icon" data-act="concert-exit" aria-label="Quitter">${ICON.close}</button>
-      <div class="c-tempo"><b>${p.tempo}</b><small>bpm · ${p.sig.join('/')}</small></div>
-      <div class="c-beats" style="--n:${b}">${Array.from({ length: b }, (_, i) => `<i class="${i === 0 ? 'one' : accents(p).includes(i) ? 'acc' : ''}"></i>`).join('')}</div>
+      ${c.tempo ? `<div class="c-tempo"><b>${p.tempo}</b><small>bpm · ${p.sig.join('/')}</small></div>` : ''}
+      ${c.pulse ? `<div class="c-beats" style="--n:${b}">${Array.from({ length: b }, (_, i) => `<i class="${i === 0 ? 'one' : accents(p).includes(i) ? 'acc' : ''}"></i>`).join('')}</div>` : '<div class="flex1"></div>'}
+      ${c.section && ch && ch.section ? `<div class="c-sec">${esc(ch.section)}</div>` : ''}
       ${capoBtn}
     </header>
-    <section class="c-cur">
-      ${ch ? `<div class="c-name">${esc(cname(ch, 'guitar'))}</div>
-      <div class="c-left" style="--n:${ch.beats}">${Array.from({ length: Math.min(ch.beats, 16) }, () => '<i></i>').join('')}</div>
-      ${diagramBlock(ch, p, { notation: 'guitar' })}` : '<div class="muted">Grille vide</div>'}
-    </section>
-    <section class="c-next">
-      ${nx ? `<div class="lbl">ensuite${nextIdx === 0 && idx !== 0 ? ' (début)' : ''}</div><div class="n-name">${esc(cname(nx, 'guitar'))}</div>${diagramBlock(nx, p, { small: true, notation: 'guitar' })}` : `<div class="lbl">fin</div>`}
-    </section>
-    <section class="c-bass">${bassHtml}</section>
+    <main class="c-stage" style="${liveLayout(c, wide)}">
+      <section class="c-cur">
+        ${ch ? `<div class="c-name">${esc(cname(ch, 'guitar'))}</div>
+        <div class="c-left">${Array.from({ length: Math.min(ch.beats, 16) }, () => '<i></i>').join('')}</div>
+        ${c.guitar ? diagramBlock(ch, p, { notation: 'guitar' }) : ''}` : '<div class="muted">Grille vide</div>'}
+      </section>
+      ${
+        c.next
+          ? `<section class="c-next">${
+              nx
+                ? `<div class="lbl">ensuite${nextIdx === 0 && idx !== 0 ? ' (début)' : ''}${c.section && nx.section && nx.section !== (ch && ch.section) ? ' · ' + esc(nx.section) : ''}</div><div class="n-name">${esc(cname(nx, 'guitar'))}</div>${c.nextGuitar ? diagramBlock(nx, p, { small: true, notation: 'guitar' }) : ''}`
+                : `<div class="lbl">fin</div>`
+            }</section>`
+          : ''
+      }
+      ${c.bass && ch ? `<section class="c-bass">${bassBlock(ch, false, nx)}</section>` : ''}
+      ${c.next && c.nextBass && nx ? `<section class="c-nbass"><div class="lbl">basse · ensuite</div>${bassBlock(nx, true)}</section>` : ''}
+    </main>
     <footer class="c-ctrl">
       <button class="cbtn" data-act="c-step" data-d="-1" aria-label="Précédent" ${player.playing ? 'disabled' : ''}>${ICON.prev}</button>
       <button class="play big" data-act="c-play" aria-label="Lecture">${player.playing ? ICON.stop : ICON.play}</button>
@@ -1110,43 +1221,60 @@ function renderConcert() {
   if (S.play) paintBeat(S.play);
 }
 function paintBeat(e) {
-  const dots = $$('#concert .c-beats i');
-  dots.forEach((d, i) => d.classList.toggle('lit', i === e.beatInBar));
-  const c = $('#concert .concert');
-  if (c) {
-    c.classList.toggle('count', !!e.countIn);
-    const pulse = $('#concert .c-beats');
+  $$('#live .c-beats i').forEach((d, i) => d.classList.toggle('lit', i === e.beatInBar));
+  const c = $('#live .concert');
+  if (!c) return;
+  c.classList.toggle('count', !!e.countIn);
+  const pulse = $('#live .c-beats');
+  if (pulse) {
     pulse.classList.remove('pulse');
     void pulse.offsetWidth;
     pulse.classList.add('pulse');
   }
+  const cn = $('#live .c-name');
   if (e.countIn) {
-    const cn = $('#concert .c-name');
     if (cn) cn.dataset.count = e.countIn;
   } else {
-    const cn = $('#concert .c-name');
     if (cn) delete cn.dataset.count;
-    $$('#concert .c-left i').forEach((d, i) => d.classList.toggle('done', i <= e.beatInChord));
+    $$('#live .c-left i').forEach((d, i) => d.classList.toggle('done', i <= e.beatInChord));
   }
 }
 function updateConcertBeat(e) {
-  const el = $('#concert');
+  const el = $('#live');
   if (!el) return;
   if (!e.countIn && String(e.chordIdx) !== el.dataset.idx) {
     S.concertIdx = e.chordIdx;
     renderConcert();
   } else paintBeat(e);
 }
+let resizeT = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeT);
+  resizeT = setTimeout(() => S.live && renderConcert(), 120);
+});
 
 // ---------------------------------------------------------------- actions
+function importMenu() {
+  openSheet(
+    () => `<h2>Importer</h2>
+    <div class="menu">
+      <button data-act="import-song"><b>Un morceau</b><br><small class="muted">Grille (texte ou PDF Ultimate Guitar) + fichier audio facultatif pour retrouver le rythme</small></button>
+      <button data-act="import-file"><b>Un fichier de sauvegarde</b><br><small class="muted">Fichier .json exporté depuis l'app (une progression ou toute la galerie)</small></button>
+    </div>`
+  );
+}
 const A = {
   'sheet-close': () => closeSheet(),
+  tab: (el) => {
+    if (S.tab === el.dataset.tab && el.dataset.tab === 'gallery' && S.importing) resetImport();
+    setTab(el.dataset.tab);
+  },
   settings: settingsSheet,
   'set-not': (el) => {
     S.settings.notation[el.dataset.area] = el.dataset.v;
     saveSettings();
     renderSheet();
-    render();
+    refresh();
   },
   new: async () => {
     const name = await askText('Nouvelle progression', '', { placeholder: 'Nom du morceau', ok: 'Créer' });
@@ -1154,17 +1282,32 @@ const A = {
     const p = newProg(name || 'Nouvelle progression');
     S.progs.push(p);
     touch(p);
-    go('editor', p.id);
+    S.cur = p.id;
+    S.sel = -1;
+    setTab('compo');
   },
-  open: (el) => go('editor', el.dataset.id),
+  open: (el) => {
+    S.cur = el.dataset.id;
+    S.sel = -1;
+    setTab('compo');
+  },
+  gfilter: (el) => {
+    S.gfilter = el.dataset.v;
+    render();
+  },
   'card-menu': (el, e) => {
     e.stopPropagation();
     cardMenu(el.dataset.id);
   },
+  'm-open': (el) => {
+    closeSheet(true);
+    A.open(el);
+  },
   'm-concert': (el) => {
     closeSheet(true);
+    S.cur = el.dataset.id;
     S.concertIdx = 0;
-    go('concert', el.dataset.id);
+    setTab('concert');
   },
   'm-rename': (el) => {
     closeSheet(true);
@@ -1173,6 +1316,14 @@ const A = {
   'm-dup': (el) => {
     closeSheet();
     dupProg(el.dataset.id);
+  },
+  'm-move': (el) => {
+    closeSheet();
+    const p = S.progs.find((x) => x.id === el.dataset.id);
+    p.origin = isImported(p) ? 'compo' : 'import';
+    touch(p);
+    refresh();
+    toast(isImported(p) ? 'Rangé dans « Importés »' : 'Rangé dans « Mes compos »');
   },
   'm-export': (el) => {
     closeSheet();
@@ -1186,19 +1337,31 @@ const A = {
     closeSheet();
     backupAll();
   },
-  import: () => {
+  'import-menu': importMenu,
+  'import-file': () => {
     closeSheet();
     importFile();
   },
-  back: () => go('gallery'),
+  'import-song': () => {
+    closeSheet(true);
+    resetImport(true);
+    if (S.tab !== 'gallery') setTab('gallery');
+    else render();
+  },
+  'close-cur': () => {
+    if (player.playing) player.stop();
+    S.cur = null;
+    S.sel = -1;
+    render();
+  },
   'rename-cur': () => renameProg(S.cur),
   play: () => togglePlay(S.sel >= 0 ? S.sel : 0, false),
   loop: () => {
     const p = prog();
     p.loop = !p.loop;
     touch(p);
-    if (S.view === 'concert') renderConcert();
-    else refreshEditorBg();
+    if (S.live) renderConcert();
+    else refresh();
   },
   'tempo-sheet': tempoSheet,
   tempo: (el) => setTempo(prog().tempo + Number(el.dataset.d)),
@@ -1208,7 +1371,7 @@ const A = {
     p.sig = el.dataset.v.split('/').map(Number);
     touch(p);
     renderSheet();
-    refreshEditorBg();
+    refresh();
   },
   'inst-sheet': instSheet,
   inst: (el) => {
@@ -1216,7 +1379,7 @@ const A = {
     p.instrument = el.dataset.v;
     touch(p);
     renderSheet();
-    refreshEditorBg();
+    refresh();
     unlock();
     loadSamples(IMAP[p.instrument].dir)
       .then(() => p.chords[0] && preview(p.chords[S.sel >= 0 ? S.sel : 0]))
@@ -1234,7 +1397,7 @@ const A = {
     p[el.dataset.k] = !p[el.dataset.k];
     touch(p);
     renderSheet();
-    refreshEditorBg();
+    refresh();
   },
   'capo-sheet': capoSheet,
   capo: (el) => {
@@ -1243,15 +1406,20 @@ const A = {
     p.capoOff = false;
     touch(p);
     renderSheet();
-    refreshEditorBg();
+    refresh();
   },
-  'capo-toggle': () => {
+  'capo-use': () => {
     const p = prog();
     if (!p.capo) {
       p.capo = suggestCapo(p.chords, gTun()).fret;
       p.capoOff = false;
     } else p.capoOff = !p.capoOff;
     touch(p);
+    refresh();
+  },
+  'capo-toggle': () => {
+    A['capo-use']();
+    const p = prog();
     renderConcert();
     toast(capoOf(p) ? `Capo ${capoOf(p)} : diagrammes transposés` : 'Sans capo : diagrammes en position réelle');
   },
@@ -1261,43 +1429,54 @@ const A = {
     p.key = null;
     touch(p);
     renderSheet();
-    refreshEditorBg();
+    refresh();
   },
   'key-tonic': (el) => {
     const p = prog();
-    const st = sheet.st;
+    const st = currentSheet().st;
     st.tonic = el.dataset.v;
     p.key = { tonic: st.tonic, mode: p.key ? p.key.mode : st.mode };
     touch(p);
     renderSheet();
-    refreshEditorBg();
+    refresh();
   },
   'key-mode': (el) => {
     const p = prog();
-    const st = sheet.st;
+    const st = currentSheet().st;
     p.key = { tonic: p.key ? p.key.tonic : st.tonic, mode: el.dataset.v };
     touch(p);
     renderSheet();
-    refreshEditorBg();
+    refresh();
   },
   acc: (el) => {
-    if (sheet.cs) {
-      sheet.cs.acc = el.dataset.v;
-      rerenderChordSheet();
-    } else if (sheet.st) {
-      sheet.st.acc = el.dataset.v;
-      renderSheet();
-    }
+    const sh = currentSheet();
+    if (sh.cs) sh.cs.acc = el.dataset.v;
+    else if (sh.st) sh.st.acc = el.dataset.v;
+    renderSheet();
   },
-  concert: () => {
-    S.concertIdx = S.sel >= 0 ? S.sel : 0;
-    const wasPlaying = player.playing;
-    go('concert');
-    if (wasPlaying) renderConcert();
+  // concert
+  'c-preset': (el) => {
+    const c = S.settings.concert;
+    Object.assign(c, CONCERT_PRESETS[el.dataset.v], { preset: el.dataset.v });
+    delete c.label;
+    saveSettings();
+    refresh();
   },
-  'concert-exit': () => {
-    go('editor');
+  'c-custom': () => {
+    S.settings.concert.preset = 'custom';
+    saveSettings();
+    refresh();
   },
+  'c-tog': (el) => {
+    const c = S.settings.concert;
+    c[el.dataset.k] = !c[el.dataset.k];
+    const match = Object.entries(CONCERT_PRESETS).find(([, v]) => ['guitar', 'bass', 'next', 'nextGuitar', 'nextBass'].every((k) => !!v[k] === !!c[k]));
+    c.preset = match ? match[0] : 'custom';
+    saveSettings();
+    refresh();
+  },
+  'go-live': goLive,
+  'concert-exit': () => exitLive(),
   'c-play': async () => {
     const p = prog();
     if (player.playing) {
@@ -1319,12 +1498,46 @@ const A = {
     saveSettings();
     renderConcert();
   },
+  // compo
   sel: (el) => {
     if (suppressClick) return;
     const i = Number(el.dataset.i);
     S.sel = S.sel === i ? -1 : i;
-    refreshEditorBg();
+    refresh();
     if (S.sel >= 0 && !player.playing) preview(prog().chords[i]);
+  },
+  'sec-rename': async (el) => {
+    const p = prog();
+    const i = Number(el.dataset.i);
+    const old = p.chords[i].section;
+    const v = await askText('Nom de la section', old);
+    if (v === null) return;
+    for (let k = i; k < p.chords.length && p.chords[k].section === old; k++) p.chords[k].section = v || undefined;
+    touch(p);
+    refresh();
+  },
+  verify: () => {
+    const p = prog();
+    delete p.chords[S.sel].conf;
+    touch(p);
+    A['next-verify']();
+  },
+  'next-verify': () => {
+    const p = prog();
+    const start = S.sel;
+    const n = p.chords.length;
+    for (let k = 1; k <= n; k++) {
+      const i = (start + k + n) % n;
+      const c = p.chords[i];
+      if (c.conf != null && c.conf < 0.6) {
+        S.sel = i;
+        refresh();
+        requestAnimationFrame(() => $('.timeline .blk.sel')?.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+        return;
+      }
+    }
+    refresh();
+    toast('Plus rien à vérifier');
   },
   'add-chord': () => chordSheet(-1),
   'edit-chord': () => chordSheet(S.sel),
@@ -1335,7 +1548,7 @@ const A = {
     p.chords.splice(S.sel + 1, 0, c);
     S.sel++;
     touch(p);
-    refreshEditorBg();
+    refresh();
   },
   'del-chord': () => {
     const p = prog();
@@ -1343,12 +1556,12 @@ const A = {
     const at = S.sel;
     S.sel = Math.min(S.sel, p.chords.length - 1);
     touch(p);
-    refreshEditorBg();
+    refresh();
     undoToast(`${cname(removed)} supprimé`, () => {
       p.chords.splice(at, 0, removed);
       S.sel = at;
       touch(p);
-      refreshEditorBg();
+      refresh();
     });
   },
   move: (el) => {
@@ -1359,20 +1572,20 @@ const A = {
     p.chords.splice(to, 0, c);
     S.sel = to;
     touch(p);
-    refreshEditorBg();
+    refresh();
   },
   dur: (el) => {
     const p = prog();
     const c = p.chords[S.sel];
-    c.beats = clamp(c.beats + Number(el.dataset.d), 1, 64);
+    c.beats = clamp(c.beats + Number(el.dataset.d), 1, 128);
     touch(p);
-    refreshEditorBg();
+    refresh();
   },
   'dur-set': (el) => {
     const p = prog();
     p.chords[S.sel].beats = Number(el.dataset.v);
     touch(p);
-    refreshEditorBg();
+    refresh();
   },
   vpos: (el) => {
     const p = prog();
@@ -1382,65 +1595,64 @@ const A = {
     const i = (cv.index + Number(el.dataset.d) + cv.voicings.length) % cv.voicings.length;
     c.voicing = { ...(c.voicing || {}), [capo]: cv.voicings[i].frets.join(',') };
     touch(p);
-    refreshEditorBg();
+    refresh();
     if (IMAP[p.instrument].kind === 'guitar') preview(c);
   },
   'preview-sel': () => preview(prog().chords[S.sel]),
   // feuille accord
   'cs-mode': (el) => {
-    const cs = sheet.cs;
+    const cs = currentSheet().cs;
     if (cs.mode === el.dataset.v) return;
     if (el.dataset.v === 'custom' && !cs.notes.length) {
-      // pré-remplit avec l'accord du répertoire
       const info = T.chordInfo({ kind: 'std', root: cs.root, quality: cs.quality, bass: cs.bass });
       cs.notes = info.tones.map((t) => t.name);
       cs.cbass = info.bassName;
     }
     cs.mode = el.dataset.v;
-    rerenderChordSheet();
+    renderSheet();
   },
   'cs-root': (el) => {
-    const cs = sheet.cs;
+    const cs = currentSheet().cs;
     cs.root = el.dataset.v;
     cs.bass = null;
-    rerenderChordSheet();
+    renderSheet();
     preview(csChord(cs));
   },
   'cs-q': (el) => {
-    const cs = sheet.cs;
+    const cs = currentSheet().cs;
     cs.quality = el.dataset.v;
     if (cs.bass) {
       const info = T.chordInfo({ kind: 'std', root: cs.root, quality: cs.quality, bass: null });
       if (!info.tones.some((t) => t.pc === T.pc(cs.bass)) && !cs.otherBass) cs.bass = null;
     }
-    rerenderChordSheet();
+    renderSheet();
     preview(csChord(cs));
   },
   'cs-pick': (el) => {
-    const cs = sheet.cs;
+    const cs = currentSheet().cs;
     cs.root = el.dataset.root;
     cs.quality = el.dataset.q;
     cs.bass = null;
-    rerenderChordSheet();
+    renderSheet();
     preview(csChord(cs));
   },
   'cs-7': () => {
-    sheet.cs.sevenths = !sheet.cs.sevenths;
-    rerenderChordSheet();
+    currentSheet().cs.sevenths = !currentSheet().cs.sevenths;
+    renderSheet();
   },
   'cs-bass': (el) => {
-    const cs = sheet.cs;
+    const cs = currentSheet().cs;
     cs.bass = el.dataset.v && T.pc(el.dataset.v) !== T.pc(cs.root) ? el.dataset.v : null;
     if (!el.dataset.v) cs.otherBass = false;
-    rerenderChordSheet();
+    renderSheet();
     preview(csChord(cs));
   },
   'cs-otherbass': () => {
-    sheet.cs.otherBass = !sheet.cs.otherBass;
-    rerenderChordSheet();
+    currentSheet().cs.otherBass = !currentSheet().cs.otherBass;
+    renderSheet();
   },
   'cs-note': (el) => {
-    const cs = sheet.cs;
+    const cs = currentSheet().cs;
     const n = el.dataset.v;
     const i = cs.notes.findIndex((x) => T.pc(x) === T.pc(n));
     if (i >= 0) cs.notes.splice(i, 1);
@@ -1453,22 +1665,23 @@ const A = {
         .catch(() => {});
     }
     if (cs.cbass && !cs.notes.includes(cs.cbass)) cs.cbass = null;
-    rerenderChordSheet();
+    renderSheet();
   },
   'cs-cbass': (el) => {
-    sheet.cs.cbass = el.dataset.v;
-    rerenderChordSheet();
+    currentSheet().cs.cbass = el.dataset.v;
+    renderSheet();
   },
   'cs-dur': (el) => {
-    sheet.cs.beats = clamp(sheet.cs.beats + Number(el.dataset.d), 1, 64);
-    rerenderChordSheet();
+    const cs = currentSheet().cs;
+    cs.beats = clamp(cs.beats + Number(el.dataset.d), 1, 128);
+    renderSheet();
   },
   'cs-dur-set': (el) => {
-    sheet.cs.beats = Number(el.dataset.v);
-    rerenderChordSheet();
+    currentSheet().cs.beats = Number(el.dataset.v);
+    renderSheet();
   },
   'cs-listen': () => {
-    const ch = csChord(sheet.cs);
+    const ch = csChord(currentSheet().cs);
     if (ch) preview(ch);
   },
   'cs-ok': commitChord,
@@ -1476,19 +1689,8 @@ const A = {
     if (window.__swWaiting) window.__swWaiting.postMessage('skipWaiting');
     else location.reload();
   },
+  ...importActions,
 };
-
-function undoToast(msg, undo) {
-  const t = $('#toast');
-  t.innerHTML = `<span>${esc(msg)}</span><button id="undo">Annuler</button>`;
-  t.classList.add('show');
-  $('#undo').onclick = () => {
-    undo();
-    t.classList.remove('show');
-  };
-  clearTimeout(toast.t);
-  toast.t = setTimeout(() => t.classList.remove('show'), 4500);
-}
 
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
@@ -1505,23 +1707,63 @@ document.addEventListener('change', (e) => {
     S.settings.guitarTuning = e.target.value;
     S.seq = null;
     saveSettings();
-    render();
+    refresh();
   } else if (k === 'b-tun') {
     S.settings.bassTuning = e.target.value;
     saveSettings();
-    render();
-  }
+    refresh();
+  } else if (k === 'concert-song') {
+    if (player.playing) player.stop();
+    S.cur = e.target.value;
+    S.sel = -1;
+    S.concertIdx = 0;
+    S.seq = null;
+    refresh();
+  } else if (importActions.__change) importActions.__change(e);
 });
 document.addEventListener('input', (e) => {
-  if (e.target.dataset.input === 'tempo-range') {
+  const k = e.target.dataset.input;
+  if (k === 'tempo-range') {
     const p = prog();
     p.tempo = Number(e.target.value);
     touch(p);
     const b = $('.tempo-big b');
     if (b) b.textContent = p.tempo;
     clearTimeout(A._tr);
-    A._tr = setTimeout(refreshEditorBg, 150);
+    A._tr = setTimeout(refresh, 150);
+  } else if (k === 'gsearch') {
+    S.gsearch = e.target.value;
+    clearTimeout(A._gs);
+    A._gs = setTimeout(() => {
+      const pos = e.target.selectionStart;
+      render();
+      const inp = $('[data-input="gsearch"]');
+      if (inp) {
+        inp.focus();
+        inp.setSelectionRange(pos, pos);
+      }
+    }, 120);
+  } else if (importActions.__input) importActions.__input(e);
+});
+
+// raccourcis clavier (ordinateur)
+document.addEventListener('keydown', (e) => {
+  if (e.target.closest('input, textarea, select') || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (currentSheet()) {
+    if (e.key === 'Escape') closeSheet();
+    return;
   }
+  const p = prog();
+  if (e.key === ' ') {
+    e.preventDefault();
+    if (S.live) A['c-play']();
+    else if (S.tab === 'compo' && p) A.play();
+  } else if (S.live && e.key === 'Escape') exitLive();
+  else if (S.live && !player.playing && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) A['c-step']({ dataset: { d: e.key === 'ArrowRight' ? 1 : -1 } });
+  else if (S.tab === 'compo' && p && p.chords.length && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+    S.sel = clamp((S.sel < 0 ? 0 : S.sel + (e.key === 'ArrowRight' ? 1 : -1)), 0, p.chords.length - 1);
+    refresh();
+  } else if (S.tab === 'compo' && p && S.sel >= 0 && (e.key === 'Delete' || e.key === 'Backspace')) A['del-chord']();
 });
 
 // ---------------------------------------------------------------- démarrage
@@ -1529,8 +1771,16 @@ async function init() {
   setupDrag();
   try {
     const s = await store.get('settings');
-    if (s) S.settings = { ...structuredClone(DEFAULT_SETTINGS), ...s, notation: { ...DEFAULT_SETTINGS.notation, ...(s.notation || {}) } };
+    if (s)
+      S.settings = {
+        ...structuredClone(DEFAULT_SETTINGS),
+        ...s,
+        notation: { ...DEFAULT_SETTINGS.notation, ...(s.notation || {}) },
+        concert: { ...DEFAULT_SETTINGS.concert, ...(s.concert || {}) },
+      };
     S.progs = (await store.all()).map(normalizeProg);
+    const last = await store.get('lastOpen');
+    if (last && S.progs.some((p) => p.id === last)) S.cur = last;
   } catch (e) {
     console.error(e);
     toast('Erreur de lecture du stockage : ' + e.message, 6000);
@@ -1549,9 +1799,18 @@ async function init() {
     await store.put(demo);
     saveSettings();
   }
+  S.tab = S.cur ? 'compo' : 'gallery';
   render();
   S.persist = await requestPersistence();
 }
+// mémorise le morceau ouvert
+let lastOpenSaved = null;
+setInterval(() => {
+  if (S.cur !== lastOpenSaved) {
+    lastOpenSaved = S.cur;
+    store.set('lastOpen', S.cur || '');
+  }
+}, 2000);
 
 window.addEventListener('app-update-ready', () => {
   const b = document.createElement('div');

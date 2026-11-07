@@ -360,3 +360,74 @@ export function chordInKey(ch, key) {
   const set = new Set(SMAP[key.mode].steps.map((s) => mod12(pc(key.tonic) + s)));
   return chordPcs(ch).every((p) => set.has(p));
 }
+
+// ---------- Lecture de symboles d'accords écrits (Ultimate Guitar, etc.) ----------
+const SUFFIX_MAP = {
+  '': 'maj', maj: 'maj', M: 'maj', major: 'maj',
+  m: 'm', min: 'm', '-': 'm', mi: 'm',
+  5: '5',
+  7: '7', dom7: '7',
+  maj7: 'maj7', M7: 'maj7', Maj7: 'maj7', ma7: 'maj7', 'Δ': 'maj7', 'Δ7': 'maj7', j7: 'maj7',
+  m7: 'm7', min7: 'm7', '-7': 'm7', mi7: 'm7',
+  sus2: 'sus2', 2: 'sus2',
+  sus4: 'sus4', sus: 'sus4', 4: 'sus4',
+  '7sus4': '7sus4', '7sus': '7sus4',
+  add9: 'add9', add2: 'add9', '(add9)': 'add9',
+  madd9: 'madd9', 'm(add9)': 'madd9', madd2: 'madd9',
+  6: '6', m6: 'm6', min6: 'm6',
+  dim: 'dim', '°': 'dim', o: 'dim',
+  dim7: 'dim7', '°7': 'dim7', o7: 'dim7',
+  m7b5: 'm7b5', 'ø': 'm7b5', 'ø7': 'm7b5', 'm7(b5)': 'm7b5', 'min7b5': 'm7b5',
+  aug: 'aug', '+': 'aug', '#5': 'aug',
+  '7#5': '7#5', '+7': '7#5', aug7: '7#5', '7+5': '7#5',
+  mMaj7: 'mMaj7', 'm(maj7)': 'mMaj7', mmaj7: 'mMaj7', mM7: 'mMaj7', 'm(M7)': 'mMaj7',
+  9: '9', maj9: 'maj9', M9: 'maj9', m9: 'm9', min9: 'm9',
+  '7b9': '7b9', '7(b9)': '7b9', '7#9': '7#9', '7(#9)': '7#9',
+  '6/9': '6/9', 69: '6/9', '6add9': '6/9',
+  m11: 'm11', min11: 'm11', 13: '13',
+};
+const CHORD_RE = /^([A-G])(#|b|♯|♭)?([^/]*?)(?:\/([A-G])(#|b|♯|♭)?)?$/;
+export function isChordToken(tok) {
+  if (/^(N\.?C\.?|n\.c\.)$/i.test(tok)) return true;
+  const m = CHORD_RE.exec(tok);
+  if (!m) return false;
+  return /^(maj|min|mi|m|M|dim|aug|sus|add|dom|j|ø|°|o|Δ|\+|-|\d|b|#|♭|♯|\(|\))*$/.test(m[3]);
+}
+const accNorm = (a) => (a === '♯' ? '#' : a === '♭' ? 'b' : a || '');
+// Notes d'un suffixe inconnu : construction générique
+function genericTones(q) {
+  const minor = /^(m|min|mi|-)(?!aj)/.test(q);
+  const t = new Map([[0, 1]]);
+  if (/sus2/.test(q)) t.set(2, 2);
+  else if (/sus/.test(q)) t.set(5, 4);
+  else t.set(minor ? 3 : 4, 3);
+  t.set(/dim|b5|°/.test(q) ? 6 : /aug|\+|#5/.test(q) ? 8 : 7, 5);
+  if (/maj7|M7|Δ|maj9|maj11|maj13/.test(q)) t.set(11, 7);
+  else if (/dim7|°7/.test(q)) t.set(9, 7);
+  else if (/7|9|11|13/.test(q) && !/add/.test(q.replace(/add\d+/, ''))) t.set(10, 7);
+  else if (/(^|[^0-9])(7|9|11|13)/.test(q.replace(/add\d+/g, ''))) t.set(10, 7);
+  if (/(^|[^/\d])6/.test(q)) t.set(9, 6);
+  if (/b9/.test(q)) t.set(1, 9);
+  else if (/#9/.test(q)) t.set(3, 9);
+  else if (/9|add2/.test(q)) t.set(2, 9);
+  if (/#11/.test(q)) t.set(6, 11);
+  else if (/11/.test(q)) t.set(5, 11);
+  if (/13/.test(q)) t.set(9, 13);
+  return [...t.entries()].sort((a, b) => a[0] - b[0]);
+}
+// -> objet accord de l'app, ou null pour N.C. / illisible
+export function parseChordSymbol(sym) {
+  if (!sym || /^N\.?C\.?$/i.test(sym)) return null;
+  const m = CHORD_RE.exec(sym.trim());
+  if (!m) return null;
+  const root = m[1] + accNorm(m[2]);
+  const bass = m[4] ? m[4] + accNorm(m[5]) : null;
+  const q = m[3];
+  const qid = SUFFIX_MAP[q] || SUFFIX_MAP[q.replace(/[()]/g, '')];
+  if (qid) return { kind: 'std', root, quality: qid, bass: bass && pc(bass) !== pc(root) ? bass : null };
+  // accord non répertorié : notes calculées, nom d'origine conservé
+  const tones = genericTones(q);
+  const notes = tones.map(([s, d]) => spellInterval(root, s, d));
+  if (bass && !notes.some((n) => pc(n) === pc(bass))) notes.unshift(bass);
+  return { kind: 'custom', notes, bass: bass || root, name: sym.trim() };
+}

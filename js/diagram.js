@@ -68,7 +68,7 @@ export function guitarDiagram(voicing, { capo = 0, fingers = true, missing = [] 
 
 // Manche de basse : toutes les notes de l'accord, fondamentale (et octaves) mise en avant
 // tones : [{pc, name, label}] ; rootPc ; bassPc ; tuning : midi[4] (grave -> aigu)
-export function bassNeck({ tones, rootPc, bassPc, tuning, notation = 'fr', labels = 'notes', frets = 12 }) {
+export function bassNeck({ tones, rootPc, bassPc, tuning, notation = 'fr', labels = 'notes', frets = 12, nextRoot = null }) {
   const strings = tuning.length;
   const OPEN = 26,
     FW = 29,
@@ -79,7 +79,7 @@ export function bassNeck({ tones, rootPc, bassPc, tuning, notation = 'fr', label
   const byPc = new Map(tones.map((t) => [t.pc, t]));
   const ys = (i) => TOP + (strings - 1 - i) * SY; // corde grave en bas
   const xf = (f) => (f === 0 ? OPEN / 2 : OPEN + (f - 0.5) * FW);
-  let o = `<svg class="bneck" viewBox="0 0 ${W} ${H}" role="img">`;
+  let o = `<svg class="bneck" viewBox="-4 0 ${W + 4} ${H}" role="img">`;
   // incrustations
   for (const f of [3, 5, 7, 9, 15]) if (f <= frets) o += `<circle cx="${OPEN + (f - 0.5) * FW}" cy="${TOP + ((strings - 1) * SY) / 2}" r="4" class="inlay"/>`;
   if (frets >= 12) {
@@ -99,13 +99,23 @@ export function bassNeck({ tones, rootPc, bassPc, tuning, notation = 'fr', label
     for (let f = 0; f <= frets; f++) {
       const p = mod12(tuning[i] + f);
       const t = byPc.get(p);
-      if (!t) continue;
+      const isNext = nextRoot && p === nextRoot.pc && p !== rootPc;
+      if (!t) {
+        // fondamentale de l'accord suivant, hors de l'accord actuel
+        if (isNext) {
+          const txt = displayNote(nextRoot.name, notation);
+          const fs = txt.length >= 4 ? 8.4 : txt.length === 3 ? 9.6 : 11.5;
+          o += `<g class="bn nextr"><circle cx="${xf(f)}" cy="${ys(i)}" r="12"/><text x="${xf(f)}" y="${ys(i) + fs * 0.36}" text-anchor="middle" font-size="${fs}">${txt}</text></g>`;
+        }
+        continue;
+      }
       const isRoot = p === rootPc;
       const isBass = p === bassPc && bassPc !== rootPc;
       const txt = labels === 'degrees' ? t.label : displayNote(t.name, notation);
       const fs = txt.length >= 4 ? 8.4 : txt.length === 3 ? 9.6 : 11.5;
       const cls = isRoot ? 'bn root' : isBass ? 'bn bassn' : 'bn';
       o += `<g class="${cls}"><circle cx="${xf(f)}" cy="${ys(i)}" r="${isRoot ? 13 : 12}"/><text x="${xf(f)}" y="${ys(i) + fs * 0.36}" text-anchor="middle" font-size="${fs}">${txt}</text></g>`;
+      if (isNext) o += `<circle class="nextring" cx="${xf(f)}" cy="${ys(i)}" r="15.5"/>`;
     }
   }
   o += `</svg>`;

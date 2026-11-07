@@ -1,5 +1,5 @@
 // Service worker : met toute l'app en cache pour un fonctionnement 100 % hors ligne.
-const VERSION = '20261107-6a1bb67';
+const VERSION = '20261107-aa6def2';
 const CACHE = 'accords-' + VERSION;
 const ASSETS = [
  "./",
@@ -65,12 +65,18 @@ const ASSETS = [
  "icons/icon-192.png",
  "icons/icon-512.png",
  "index.html",
+ "js/analysis-core.js",
+ "js/analysis-worker.js",
  "js/app.js",
+ "js/audio-import.js",
  "js/audio.js",
+ "js/chart.js",
  "js/diagram.js",
  "js/guitar.js",
+ "js/importer.js",
  "js/store.js",
  "js/theory.js",
+ "js/ui.js",
  "manifest.webmanifest",
  "organ/A2.mp3",
  "organ/A3.mp3",
@@ -151,7 +157,13 @@ const ASSETS = [
  "strings/Gb2.mp3",
  "strings/Gb3.mp3",
  "strings/Gb4.mp3",
- "strings/Gb5.mp3"
+ "strings/Gb5.mp3",
+ "vendor/ESSENTIA-LICENSE.txt",
+ "vendor/PDFJS-LICENSE.txt",
+ "vendor/essentia-wasm.umd.js",
+ "vendor/essentia.js-core.umd.min.js",
+ "vendor/pdf.min.mjs",
+ "vendor/pdf.worker.min.mjs"
 ];
 
 self.addEventListener('install', (e) => {
