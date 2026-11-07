@@ -540,11 +540,12 @@ function viewCompo() {
       lastSec = c.section || lastSec;
       const cc = confClass(c.conf);
       const badge = c.conf != null && c.conf < 0.85 ? `<span class="blk-conf">${Math.round(c.conf * 100)}%</span>` : '';
-      return `${head}<div class="blk ${i === S.sel ? 'sel' : ''} ${key && !T.chordInKey(c, key) ? 'out' : ''} ${cc}" data-act="sel" data-i="${i}" style="--beats:${c.beats}">
+      return `${head}<div class="blk ${i === S.sel ? 'sel' : ''} ${S.multi && S.multi.has(c.id) ? 'msel' : ''} ${key && !T.chordInKey(c, key) ? 'out' : ''} ${cc}" data-act="sel" data-i="${i}" style="--beats:${c.beats}">
         <span class="blk-name">${esc(cname(c))}</span><span class="blk-dur">${durLabel(c.beats, p)}</span>${badge}<span class="blk-prog"></span></div>`;
     })
     .join('');
-  return `<div class="page compo">
+  const hasPanel = S.multi ? true : S.sel >= 0 && p.chords[S.sel];
+  return `<div class="page compo ${hasPanel ? 'has-sel' : ''} ${S.multi ? 'multi' : ''}">
   <header class="bar">
     <button class="icon" data-act="close-cur" aria-label="Fermer">${ICON.back}</button>
     <h1 class="title" data-act="rename-cur">${esc(p.name)}</h1>
@@ -560,6 +561,7 @@ function viewCompo() {
   <div class="chips">
     <button class="chip ${key && !auto ? 'on' : ''}" data-act="key-sheet">Gamme : ${key ? T.keyName(key, N('editor')) + (auto ? ' <i>(suggérée)</i>' : '') : '—'}</button>
     ${capoNote}
+    <button class="chip ${S.multi ? 'on' : ''}" data-act="multi">${S.multi ? 'Terminer la sélection' : 'Sélection multiple'}</button>
     ${mc != null ? `<button class="chip ${nv ? 'warn' : 'ok'}" data-act="next-verify">Certitude ${pct(mc)}${nv ? ` · ${nv} à vérifier` : ' ✓'}</button>` : ''}
   </div>
   <div class="compo-grid">
@@ -570,7 +572,7 @@ function viewCompo() {
       </div>
       <div class="tl-meta muted small">${p.chords.length ? `${(totalBeats(p) / bpb(p)).toFixed(totalBeats(p) % bpb(p) ? 1 : 0)} mesures · ${fmtDur(p)} · appui long sur un accord pour le déplacer` : 'Touche + pour ajouter ton premier accord.'}</div>
     </div>
-    <aside class="compo-side">${S.sel >= 0 && p.chords[S.sel] ? selPanel(p, S.sel) : `<div class="side-hint muted small">Touche un accord pour le modifier.</div>`}</aside>
+    <aside class="compo-side">${S.multi ? multiPanel(p) : S.sel >= 0 && p.chords[S.sel] ? selPanel(p, S.sel) : `<div class="side-hint muted small">Touche un accord pour le modifier.</div>`}</aside>
   </div>
 </div>`;
 }
@@ -608,6 +610,7 @@ function selPanel(p, i) {
       ? `<div class="conf-row ${confClass(ch.conf)}"><span>Certitude estimée : <b>${pct(ch.conf)}</b>${ch.conf < 0.6 ? ' — à vérifier' : ''}</span><button class="btn small" data-act="verify">${ICON.check}<span>Vérifié</span></button></div>`
       : '';
   return `<div class="selpanel">
+    <button class="sp-close" data-act="sel-close" aria-label="Fermer">${ICON.close}</button>
     ${ch.section ? `<div class="sp-sec">${esc(ch.section)}</div>` : ''}
     <div class="sp-head">
       <div><div class="sp-name">${esc(cname(ch))}</div>
@@ -635,6 +638,55 @@ function selPanel(p, i) {
       <button class="btn danger" data-act="del-chord">Supprimer</button>
     </div>
   </div>`;
+}
+// ---- sélection multiple
+const selected = (p) => p.chords.filter((c) => S.multi.has(c.id));
+function multiPanel(p) {
+  const sel = selected(p);
+  if (!sel.length)
+    return `<div class="selpanel multipanel">
+    <button class="sp-close" data-act="multi" aria-label="Terminer">${ICON.close}</button>
+    <div class="sp-name">Sélection multiple</div>
+    <p class="muted small">Touche les accords à modifier ensemble${matchMedia('(hover: hover)').matches ? ' (Maj + clic pour sélectionner une plage)' : ''}.</p>
+    <div class="row tight"><button class="btn small" data-act="m-all">Tout sélectionner</button><button class="btn small ghost" data-act="multi">Terminer</button></div>
+  </div>`;
+  const b = bpb(p);
+  const beats = [...new Set(sel.map((c) => c.beats))];
+  const names = [...new Set(sel.map((c) => cname(c)))];
+  const secs = [...new Set(sel.map((c) => c.section || '—'))];
+  const anyConf = sel.some((c) => c.conf != null);
+  return `<div class="selpanel multipanel">
+    <button class="sp-close" data-act="multi" aria-label="Terminer">${ICON.close}</button>
+    <div class="sp-head"><div><div class="sp-name">${sel.length} accord${sel.length > 1 ? 's' : ''}</div>
+      <div class="muted small">${esc(names.slice(0, 8).join(' · '))}${names.length > 8 ? '…' : ''}${secs.length === 1 && secs[0] !== '—' ? ' · ' + esc(secs[0]) : ''}</div></div></div>
+    <div class="row tight"><button class="btn small ghost" data-act="m-all">Tout</button><button class="btn small ghost" data-act="m-none">Aucun</button>${secs.length === 1 && secs[0] !== '—' ? `<button class="btn small ghost" data-act="m-sec">Toute la section</button>` : ''}</div>
+    <label class="small muted">Durée ${beats.length === 1 ? `: <b>${beats[0]} temps</b>` : '(variable)'}</label>
+    <div class="row tight">
+      <div class="stepper"><button data-act="m-dur" data-d="-1">−</button><span>chacun</span><button data-act="m-dur" data-d="1">+</button></div>
+      <div class="quick">${[0.5, 1, 2, 4].filter((m) => Number.isInteger(b * m)).map((m) => `<button class="${beats.length === 1 && beats[0] === b * m ? 'on' : ''}" data-act="m-dur-set" data-v="${b * m}">${m === 0.5 ? '½' : m} mes.</button>`).join('')}</div>
+    </div>
+    <div class="row tight"><span class="small muted">Transposer</span><button class="btn small" data-act="m-trans" data-d="-1">−½ ton</button><button class="btn small" data-act="m-trans" data-d="1">+½ ton</button></div>
+    <div class="sp-actions wrap">
+      <button class="btn" data-act="m-replace">Remplacer l’accord</button>
+      <button class="btn" data-act="m-section">Section…</button>
+      ${anyConf ? `<button class="btn" data-act="m-verify">${ICON.check}<span>Vérifiés</span></button>` : ''}
+      <button class="btn" data-act="m-dup">Dupliquer</button>
+      <button class="btn danger" data-act="m-del">Supprimer</button>
+    </div>
+  </div>`;
+}
+
+// garde l'accord sélectionné visible au-dessus du panneau (téléphone)
+function keepSelVisible() {
+  requestAnimationFrame(() => {
+    const blk = $('.timeline .blk.sel');
+    const panel = $('.compo-side .selpanel');
+    if (!blk || !panel || getComputedStyle($('.compo-side')).position !== 'fixed') return;
+    const r = blk.getBoundingClientRect();
+    const top = panel.getBoundingClientRect().top;
+    if (r.bottom > top - 10) window.scrollBy({ top: r.bottom - top + 24, behavior: 'smooth' });
+    else if (r.top < 70) window.scrollBy({ top: r.top - 90, behavior: 'smooth' });
+  });
 }
 function updateEditorPlay() {
   const e = S.play;
@@ -667,7 +719,7 @@ function setupDrag() {
     'pointerdown',
     (e) => {
       const blk = e.target.closest('.timeline .blk[data-i]');
-      if (!blk || S.tab !== 'compo' || S.live) return;
+      if (!blk || S.tab !== 'compo' || S.live || S.multi) return;
       startX = e.clientX;
       startY = e.clientY;
       cancel();
@@ -940,13 +992,13 @@ function renderChordSheet(cs) {
       ${ch ? `<div class="cs-pv-name">${esc(cname(ch))}</div>${diagramBlock(ch, p, { small: true, notation: 'editor' })}<button class="icon" data-act="cs-listen" aria-label="Écouter">${ICON.speaker}</button>` : '<div class="muted">Choisis des notes</div>'}
     </div>
     ${body}
-    <h3>Durée</h3>
+    ${cs.multi ? `<p class="muted small">Remplace les ${cs.multi} accords sélectionnés ; leurs durées et sections sont conservées.</p>` : `<h3>Durée</h3>
     <div class="row"><div class="stepper"><button data-act="cs-dur" data-d="-1">−</button><span><b>${cs.beats}</b> temps</span><button data-act="cs-dur" data-d="1">+</button></div>
     <div class="quick">${[1, 2, 4].map((m) => `<button class="${cs.beats === b * m ? 'on' : ''}" data-act="cs-dur-set" data-v="${b * m}">${m} mes.</button>`).join('')}</div></div>
     <h3>Section <small class="muted">(facultatif)</small></h3>
     <input class="txt" id="cs-section" list="sec-list" placeholder="Couplet, Refrain…" value="${esc(cs.section)}" maxlength="40">
-    <datalist id="sec-list">${[...new Set([...secs, 'Intro', 'Couplet', 'Pré-refrain', 'Refrain', 'Pont', 'Solo', 'Outro'])].map((s) => `<option value="${esc(s)}">`).join('')}</datalist>
-    <div class="cs-foot"><button class="btn ghost" data-act="sheet-close">Annuler</button><button class="btn primary" data-act="cs-ok" ${ch ? '' : 'disabled'}>${cs.editIndex >= 0 ? 'Valider' : 'Ajouter'}</button></div>`;
+    <datalist id="sec-list">${[...new Set([...secs, 'Intro', 'Couplet', 'Pré-refrain', 'Refrain', 'Pont', 'Solo', 'Outro'])].map((s) => `<option value="${esc(s)}">`).join('')}</datalist>`}
+    <div class="cs-foot"><button class="btn ghost" data-act="sheet-close">Annuler</button><button class="btn primary" data-act="cs-ok" ${ch ? '' : 'disabled'}>${cs.multi ? 'Remplacer' : cs.editIndex >= 0 ? 'Valider' : 'Ajouter'}</button></div>`;
 }
 function keyboard(cs) {
   const sel = new Set(cs.notes.map(T.pc));
@@ -981,7 +1033,9 @@ function commitChord() {
   const ch = csChord(cs);
   if (!ch) return;
   const section = cs.section.trim() || undefined;
-  if (cs.editIndex >= 0) {
+  if (cs.multi) {
+    p.chords = p.chords.map((c) => (S.multi.has(c.id) ? { ...ch, id: c.id, beats: c.beats, section: c.section, voicing: {} } : c));
+  } else if (cs.editIndex >= 0) {
     const old = p.chords[cs.editIndex];
     const same = JSON.stringify([old.kind, old.root, old.quality, old.bass, old.notes]) === JSON.stringify([ch.kind, ch.root, ch.quality, ch.bass, ch.notes]);
     p.chords[cs.editIndex] = { ...ch, id: old.id, beats: cs.beats, voicing: same ? old.voicing : {}, section };
@@ -1287,6 +1341,7 @@ const A = {
     setTab('compo');
   },
   open: (el) => {
+    S.multi = null;
     S.cur = el.dataset.id;
     S.sel = -1;
     setTab('compo');
@@ -1349,6 +1404,7 @@ const A = {
     else render();
   },
   'close-cur': () => {
+    S.multi = null;
     if (player.playing) player.stop();
     S.cur = null;
     S.sel = -1;
@@ -1499,11 +1555,118 @@ const A = {
     renderConcert();
   },
   // compo
-  sel: (el) => {
+  multi: () => {
+    S.multi = S.multi ? null : new Set(S.sel >= 0 && prog().chords[S.sel] ? [prog().chords[S.sel].id] : []);
+    S.sel = -1;
+    S.lastMulti = null;
+    refresh();
+  },
+  'm-all': () => {
+    S.multi = new Set(prog().chords.map((c) => c.id));
+    refresh();
+  },
+  'm-none': () => {
+    S.multi = new Set();
+    refresh();
+  },
+  'm-sec': () => {
+    const p = prog();
+    const sec = selected(p)[0].section;
+    p.chords.forEach((c) => c.section === sec && S.multi.add(c.id));
+    refresh();
+  },
+  'm-dur': (el) => {
+    const p = prog();
+    selected(p).forEach((c) => (c.beats = clamp(c.beats + Number(el.dataset.d), 1, 128)));
+    touch(p);
+    refresh();
+  },
+  'm-dur-set': (el) => {
+    const p = prog();
+    selected(p).forEach((c) => (c.beats = Number(el.dataset.v)));
+    touch(p);
+    refresh();
+  },
+  'm-trans': (el) => {
+    const p = prog();
+    const d = Number(el.dataset.d);
+    p.chords = p.chords.map((c) => (S.multi.has(c.id) ? { ...T.transposeChord(c, d), voicing: {} } : c));
+    touch(p);
+    refresh();
+  },
+  'm-replace': () => {
+    const p = prog();
+    const first = p.chords.findIndex((c) => S.multi.has(c.id));
+    chordSheet(first);
+    const cs = currentSheet().cs;
+    cs.editIndex = -1;
+    cs.multi = S.multi.size;
+    renderSheet();
+  },
+  'm-section': async () => {
+    const p = prog();
+    const secs = [...new Set(selected(p).map((c) => c.section).filter(Boolean))];
+    const v = await askText('Section des accords sélectionnés', secs.length === 1 ? secs[0] : '', { placeholder: 'Couplet, Refrain… (vide = aucune)' });
+    if (v === null) return;
+    selected(p).forEach((c) => (v ? (c.section = v) : delete c.section));
+    touch(p);
+    refresh();
+  },
+  'm-verify': () => {
+    const p = prog();
+    selected(p).forEach((c) => delete c.conf);
+    touch(p);
+    refresh();
+  },
+  'm-dup': () => {
+    const p = prog();
+    const sel = selected(p);
+    const last = p.chords.reduce((a, c, i) => (S.multi.has(c.id) ? i : a), -1);
+    const copies = sel.map((c) => ({ ...structuredClone(c), id: uid() }));
+    p.chords.splice(last + 1, 0, ...copies);
+    S.multi = new Set(copies.map((c) => c.id));
+    touch(p);
+    refresh();
+    toast(`${copies.length} accord(s) dupliqué(s) — la copie est sélectionnée`);
+  },
+  'm-del': () => {
+    const p = prog();
+    const before = structuredClone(p.chords);
+    const n = S.multi.size;
+    const ids = new Set(S.multi);
+    p.chords = p.chords.filter((c) => !S.multi.has(c.id));
+    S.multi = new Set();
+    touch(p);
+    refresh();
+    undoToast(`${n} accord${n > 1 ? 's' : ''} supprimé${n > 1 ? 's' : ''}`, () => {
+      p.chords = before;
+      S.multi = ids;
+      touch(p);
+      refresh();
+    });
+  },
+  'sel-close': () => {
+    S.sel = -1;
+    refresh();
+  },
+  sel: (el, e) => {
     if (suppressClick) return;
     const i = Number(el.dataset.i);
+    if (S.multi) {
+      const p = prog();
+      const id = p.chords[i].id;
+      if (e && e.shiftKey && S.lastMulti != null) {
+        const [a, z] = [Math.min(S.lastMulti, i), Math.max(S.lastMulti, i)];
+        for (let k = a; k <= z; k++) S.multi.add(p.chords[k].id);
+      } else if (S.multi.has(id)) S.multi.delete(id);
+      else S.multi.add(id);
+      S.lastMulti = i;
+      refresh();
+      return;
+    }
     S.sel = S.sel === i ? -1 : i;
     refresh();
+    keepSelVisible();
     if (S.sel >= 0 && !player.playing) preview(prog().chords[i]);
   },
   'sec-rename': async (el) => {
@@ -1532,7 +1695,14 @@ const A = {
       if (c.conf != null && c.conf < 0.6) {
         S.sel = i;
         refresh();
-        requestAnimationFrame(() => $('.timeline .blk.sel')?.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+        requestAnimationFrame(() => {
+          const el = $('.timeline .blk.sel');
+          const panel = $('.compo-side .selpanel');
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const bottom = panel && getComputedStyle($('.compo-side')).position === 'fixed' ? panel.getBoundingClientRect().top : innerHeight;
+          window.scrollBy({ top: r.top - (bottom - r.height) / 2, behavior: 'smooth' });
+        });
         return;
       }
     }
@@ -1715,6 +1885,7 @@ document.addEventListener('change', (e) => {
   } else if (k === 'concert-song') {
     if (player.playing) player.stop();
     S.cur = e.target.value;
+    S.multi = null;
     S.sel = -1;
     S.concertIdx = 0;
     S.seq = null;
@@ -1759,6 +1930,7 @@ document.addEventListener('keydown', (e) => {
     if (S.live) A['c-play']();
     else if (S.tab === 'compo' && p) A.play();
   } else if (S.live && e.key === 'Escape') exitLive();
+  else if (S.multi && e.key === 'Escape') A.multi();
   else if (S.live && !player.playing && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) A['c-step']({ dataset: { d: e.key === 'ArrowRight' ? 1 : -1 } });
   else if (S.tab === 'compo' && p && p.chords.length && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
     S.sel = clamp((S.sel < 0 ? 0 : S.sel + (e.key === 'ArrowRight' ? 1 : -1)), 0, p.chords.length - 1);

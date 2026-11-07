@@ -1,5 +1,5 @@
 // Service worker : met toute l'app en cache pour un fonctionnement 100 % hors ligne.
-const VERSION = '20261107-aa6def2';
+const VERSION = '20261107-0be74d4';
 const CACHE = 'accords-' + VERSION;
 const ASSETS = [
  "./",
